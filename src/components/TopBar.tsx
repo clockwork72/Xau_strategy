@@ -1,5 +1,5 @@
 import { useLayoutEffect } from 'react'
-import { theme, fonts, sizes } from '../theme'
+import { theme, fonts, sizes, TITLE_BAR_CONTROLS_WIDTH, type ThemeMode } from '../theme'
 import type { Timeframe } from '../types'
 import SegmentedToggle from './SegmentedToggle'
 import { formatCrosshair } from '../util/time'
@@ -18,6 +18,8 @@ interface Props {
   replaySpeed: number
   onReplaySpeedChange: (v: number) => void
   replayNowSec?: number
+  themeMode: ThemeMode
+  onThemeToggle: () => void
 }
 
 const STATUS_DOT: Record<Props['status']['kind'], string> = {
@@ -34,7 +36,13 @@ const SPEED_OPTIONS = [
   { value: 60, label: '60×' },
 ] as const
 
-// Scrubber chrome can't be set via inline style (pseudo-elements). Inject once.
+// Window drag annotations. Inline CSS prop names — type-cast since
+// WebkitAppRegion isn't in React's CSSProperties.
+const dragStyle = { WebkitAppRegion: 'drag' } as React.CSSProperties
+const noDragStyle = { WebkitAppRegion: 'no-drag' } as React.CSSProperties
+
+// Scrubber chrome can't be set via inline style (pseudo-elements). Inject once,
+// and re-inject on theme change since the rule references current var values.
 const SCRUBBER_STYLE_ID = 'xau-scrubber-styles'
 const SCRUBBER_CSS = `
 .xau-scrubber {
@@ -49,12 +57,12 @@ const SCRUBBER_CSS = `
 .xau-scrubber:focus { outline: none; }
 .xau-scrubber::-webkit-slider-runnable-track {
   height: 3px;
-  background: ${theme.surface};
+  background: var(--theme-surface);
   border-radius: 2px;
 }
 .xau-scrubber::-moz-range-track {
   height: 3px;
-  background: ${theme.surface};
+  background: var(--theme-surface);
   border-radius: 2px;
 }
 .xau-scrubber::-webkit-slider-thumb {
@@ -62,8 +70,8 @@ const SCRUBBER_CSS = `
   appearance: none;
   width: 12px;
   height: 12px;
-  background: ${theme.text};
-  border: 2px solid ${theme.panel};
+  background: var(--theme-text);
+  border: 2px solid var(--theme-panel);
   border-radius: 50%;
   margin-top: -4.5px;
   transition: transform 120ms ease, background 120ms ease;
@@ -71,16 +79,16 @@ const SCRUBBER_CSS = `
 .xau-scrubber::-moz-range-thumb {
   width: 12px;
   height: 12px;
-  background: ${theme.text};
-  border: 2px solid ${theme.panel};
+  background: var(--theme-text);
+  border: 2px solid var(--theme-panel);
   border-radius: 50%;
   cursor: pointer;
   transition: transform 120ms ease;
 }
 .xau-scrubber:hover:not(:disabled)::-webkit-slider-thumb { transform: scale(1.18); }
 .xau-scrubber:hover:not(:disabled)::-moz-range-thumb { transform: scale(1.18); }
-.xau-scrubber:active:not(:disabled)::-webkit-slider-thumb { transform: scale(1.3); background: ${theme.warn}; }
-.xau-scrubber:active:not(:disabled)::-moz-range-thumb { transform: scale(1.3); background: ${theme.warn}; }
+.xau-scrubber:active:not(:disabled)::-webkit-slider-thumb { transform: scale(1.3); background: var(--theme-warn); }
+.xau-scrubber:active:not(:disabled)::-moz-range-thumb { transform: scale(1.3); background: var(--theme-warn); }
 `
 
 export default function TopBar(p: Props) {
@@ -95,7 +103,6 @@ export default function TopBar(p: Props) {
   const disabled = p.replayMax <= 0
   const safePlayhead = Math.min(p.replayPlayhead, Math.max(0, p.replayMax))
 
-  // Split "YYYY-MM-DD HH:MM" → ["YYYY-MM-DD", "HH:MM"]
   const fullStamp = p.replayNowSec !== undefined ? formatCrosshair(p.replayNowSec) : null
   const [datePart, timePart] = fullStamp ? fullStamp.split(' ') : [null, null]
   const shortDate = datePart ? formatShortDate(datePart) : null
@@ -106,21 +113,24 @@ export default function TopBar(p: Props) {
         height: sizes.topbar,
         display: 'flex',
         alignItems: 'stretch',
-        padding: '0 14px',
+        padding: `0 ${TITLE_BAR_CONTROLS_WIDTH}px 0 14px`,
         background: theme.panel,
         borderBottom: `1px solid ${theme.border}`,
         gap: 14,
         fontFamily: fonts.sans,
         userSelect: 'none',
+        ...dragStyle,
       }}
     >
-      {/* brand */}
+      {/* brand — draggable area */}
       <Group>
-        <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: 0.4 }}>XAU·SBX</span>
+        <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: 0.4, color: theme.text }}>
+          XAU·SBX
+        </span>
       </Group>
 
       {/* timeframe */}
-      <Group>
+      <Group noDrag>
         <SegmentedToggle<Timeframe>
           size="sm"
           options={[
@@ -135,20 +145,12 @@ export default function TopBar(p: Props) {
 
       <Divider />
 
-      {/* transport — Play is the hero */}
-      <Group gap={2}>
-        <IconBtn
-          ariaLabel="Reset to start (Home)"
-          onClick={p.onReplayReset}
-          disabled={disabled}
-        >
+      {/* transport */}
+      <Group noDrag gap={2}>
+        <IconBtn ariaLabel="Reset to start (Home)" onClick={p.onReplayReset} disabled={disabled}>
           <SkipBackIcon />
         </IconBtn>
-        <IconBtn
-          ariaLabel="Step back (←)"
-          onClick={() => p.onReplayStep(-1)}
-          disabled={disabled}
-        >
+        <IconBtn ariaLabel="Step back (←)" onClick={() => p.onReplayStep(-1)} disabled={disabled}>
           <StepBackIcon />
         </IconBtn>
         <IconBtn
@@ -160,17 +162,13 @@ export default function TopBar(p: Props) {
         >
           {p.replayPlaying ? <PauseIcon /> : <PlayIcon />}
         </IconBtn>
-        <IconBtn
-          ariaLabel="Step forward (→)"
-          onClick={() => p.onReplayStep(1)}
-          disabled={disabled}
-        >
+        <IconBtn ariaLabel="Step forward (→)" onClick={() => p.onReplayStep(1)} disabled={disabled}>
           <StepForwardIcon />
         </IconBtn>
       </Group>
 
-      {/* speed — sliding-indicator pill, mirrors timeframe */}
-      <Group>
+      {/* speed */}
+      <Group noDrag>
         <SegmentedToggle<number>
           size="sm"
           options={SPEED_OPTIONS as unknown as ReadonlyArray<{ value: number; label: string }>}
@@ -182,7 +180,7 @@ export default function TopBar(p: Props) {
 
       <Divider />
 
-      {/* scrubber takes remaining width */}
+      {/* scrubber + timecode */}
       <div
         style={{
           display: 'flex',
@@ -190,6 +188,7 @@ export default function TopBar(p: Props) {
           gap: 14,
           flex: 1,
           minWidth: 0,
+          ...noDragStyle,
         }}
       >
         <input
@@ -205,7 +204,6 @@ export default function TopBar(p: Props) {
           aria-label="Replay playhead"
         />
 
-        {/* timecode block — hero is the time, subtitle is index + date */}
         <div
           style={{
             display: 'flex',
@@ -246,7 +244,12 @@ export default function TopBar(p: Props) {
 
       <Divider />
 
-      {/* load status */}
+      {/* theme toggle */}
+      <Group noDrag>
+        <ThemeToggle mode={p.themeMode} onToggle={p.onThemeToggle} />
+      </Group>
+
+      {/* load status — passive, can be drag */}
       <Group>
         <div
           style={{
@@ -275,7 +278,15 @@ export default function TopBar(p: Props) {
 }
 
 // --------------------------------------------------------------------
-function Group({ children, gap = 8 }: { children: React.ReactNode; gap?: number }) {
+function Group({
+  children,
+  gap = 8,
+  noDrag,
+}: {
+  children: React.ReactNode
+  gap?: number
+  noDrag?: boolean
+}) {
   return (
     <div
       style={{
@@ -283,6 +294,7 @@ function Group({ children, gap = 8 }: { children: React.ReactNode; gap?: number 
         alignItems: 'center',
         gap,
         flexShrink: 0,
+        ...(noDrag ? noDragStyle : {}),
       }}
     >
       {children}
@@ -301,6 +313,39 @@ function Divider() {
         flexShrink: 0,
       }}
     />
+  )
+}
+
+function ThemeToggle({ mode, onToggle }: { mode: ThemeMode; onToggle: () => void }) {
+  return (
+    <button
+      onClick={onToggle}
+      title={mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      aria-label="Toggle theme"
+      style={{
+        appearance: 'none',
+        background: 'transparent',
+        border: 'none',
+        width: 26,
+        height: 26,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: theme.textMuted,
+        cursor: 'pointer',
+        borderRadius: 5,
+        transition: 'color 140ms ease, background 140ms ease',
+        padding: 0,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.color = theme.text
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.color = theme.textMuted
+      }}
+    >
+      {mode === 'dark' ? <SunIcon /> : <MoonIcon />}
+    </button>
   )
 }
 
@@ -381,7 +426,7 @@ function IconBtn({
 }
 
 // --------------------------------------------------------------------
-// Transport glyphs — filled monochrome SVGs, currentColor for theming.
+// Glyphs
 
 function SkipBackIcon() {
   return (
@@ -425,9 +470,25 @@ function PauseIcon() {
   )
 }
 
+function SunIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4l1.4-1.4M17 7l1.4-1.4" />
+    </svg>
+  )
+}
+
+function MoonIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M21 13.5A9 9 0 1 1 10.5 3a7.5 7.5 0 0 0 10.5 10.5z" />
+    </svg>
+  )
+}
+
 // --------------------------------------------------------------------
 function formatShortDate(yyyymmdd: string): string {
-  // "2026-05-21" → "21 May"
   const m = yyyymmdd.match(/^(\d{4})-(\d{2})-(\d{2})$/)
   if (!m) return yyyymmdd
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']

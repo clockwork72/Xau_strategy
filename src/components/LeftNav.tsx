@@ -18,10 +18,6 @@ interface Props {
   onSessionsEnabledChange: (v: boolean) => void
   trendlineEnabled: boolean
   onTrendlineEnabledChange: (v: boolean) => void
-  drawModeEnabled: boolean
-  onDrawModeEnabledChange: (v: boolean) => void
-  drawnLineCount: number
-  onClearDrawnLines: () => void
   strategyEnabled: boolean
   onStrategyEnabledChange: (v: boolean) => void
   signalCount: number
@@ -42,10 +38,6 @@ export default function LeftNav({
   onSessionsEnabledChange,
   trendlineEnabled,
   onTrendlineEnabledChange,
-  drawModeEnabled,
-  onDrawModeEnabledChange,
-  drawnLineCount,
-  onClearDrawnLines,
   strategyEnabled,
   onStrategyEnabledChange,
   signalCount,
@@ -99,12 +91,6 @@ export default function LeftNav({
           label="Trendline"
           enabled={trendlineEnabled}
           onChange={onTrendlineEnabledChange}
-        />
-        <DrawRow
-          enabled={drawModeEnabled}
-          onChange={onDrawModeEnabledChange}
-          count={drawnLineCount}
-          onClear={onClearDrawnLines}
         />
       </Section>
 
@@ -237,78 +223,6 @@ function StrategyRow({
         {enabled ? signalCount : '—'}
       </span>
     </label>
-  )
-}
-
-function DrawRow({
-  enabled,
-  onChange,
-  count,
-  onClear,
-}: {
-  enabled: boolean
-  onChange: (v: boolean) => void
-  count: number
-  onClear: () => void
-}) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        padding: '5px 8px',
-        borderRadius: 5,
-        fontSize: 11,
-        color: theme.text,
-      }}
-    >
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, cursor: 'pointer' }}>
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={(e) => onChange(e.target.checked)}
-          style={{ margin: 0, accentColor: theme.warn, cursor: 'pointer' }}
-        />
-        <span
-          style={{
-            color: enabled ? theme.text : theme.textMuted,
-            fontFamily: fonts.mono,
-            letterSpacing: 0.4,
-          }}
-        >
-          Draw
-        </span>
-      </label>
-      <span
-        style={{
-          fontSize: 10,
-          fontFamily: fonts.mono,
-          color: theme.textInactive,
-        }}
-      >
-        {count}
-      </span>
-      <button
-        onClick={onClear}
-        disabled={count === 0}
-        style={{
-          appearance: 'none',
-          background: 'transparent',
-          border: `1px solid ${theme.border}`,
-          color: count === 0 ? theme.textInactive : theme.textMuted,
-          padding: '2px 6px',
-          fontSize: 9.5,
-          fontFamily: fonts.mono,
-          letterSpacing: 0.4,
-          borderRadius: 3,
-          cursor: count === 0 ? 'default' : 'pointer',
-          opacity: count === 0 ? 0.45 : 1,
-        }}
-      >
-        Clear
-      </button>
-    </div>
   )
 }
 

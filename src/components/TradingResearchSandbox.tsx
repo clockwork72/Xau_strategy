@@ -5,6 +5,7 @@ import {
   LineStyle,
   type CandlestickData,
   type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type LogicalRange,
   type MouseEventParams,
@@ -13,15 +14,23 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts'
 
-import { theme, fonts, sizes } from '../theme'
+import { theme, fonts, sizes, palettes, type ThemeMode } from '../theme'
 import type { Candle, CvdCandle, DatasetBundle, Timeframe } from '../types'
 import { loadCsv, MOCK_M1, MOCK_M5, rowsToBundle } from '../data'
 import { computeEma } from '../engine/indicators'
 import { runPriceActionBeta } from '../engine/priceActionBeta'
 import { computeStats } from '../engine/portfolio'
-import { findSwingHighs, findSwingLows } from '../engine/swings'
+import { findSwingHighs, findSwingLows, type SwingPoint } from '../engine/swings'
 import { pickChannels } from '../engine/trendlines'
 import type { SessionToggles } from '../engine/sessions'
+import {
+  HORIZONTAL_EXTEND_SEC,
+  hitTestLine,
+  nextLineId,
+  snapToNearestPivot,
+  type DrawTool,
+  type DrawnLine,
+} from '../engine/drawing'
 import { formatAxisTick, formatCrosshair, parseCasaLocalToUtcSec } from '../util/time'
 
 const DEFAULT_RANGE_START_CASA = '2026-05-21 00:00'
@@ -62,6 +71,7 @@ import LeftNav from './LeftNav'
 import RightPanels from './RightPanels'
 import StatusBar from './StatusBar'
 import SessionOverlay from './SessionOverlay'
+import DrawToolbar from './DrawToolbar'
 
 // --------------------------------------------------------------------
 //   Component
@@ -74,6 +84,7 @@ export default function TradingResearchSandbox() {
   const cvdChartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const cvdSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const cvdZeroLineRef = useRef<IPriceLine | null>(null)
   const emaSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   // Pool of LineSeries pairs (resistance + support) — grows on demand,
   // one pair per detected channel. History entries get a faded color.
@@ -81,13 +92,22 @@ export default function TradingResearchSandbox() {
     res: ISeriesApi<'Line'>
     sup: ISeriesApi<'Line'>
   }>>([])
-  // Pool of LineSeries for user-drawn lines.
-  const drawnSeriesPoolRef = useRef<ISeriesApi<'Line'>[]>([])
-  // Working anchor (waiting for the second click).
+  // Per-line render handles keyed by DrawnLine.id. Trendlines render via a
+  // LineSeries; horizontals render via a priceLine on the candle series.
+  type DrawHandle =
+    | { kind: 'line'; api: ISeriesApi<'Line'> }
+    | { kind: 'priceLine'; api: IPriceLine }
+  const drawnRenderMapRef = useRef<Map<string, DrawHandle>>(new Map())
+  // Working anchor (waiting for the second click on a trendline draw).
   const drawWorkingRef = useRef<{ time: number; price: number } | null>(null)
-  // Mirror of drawModeEnabled so the click handler sees the latest value
-  // without re-subscribing on every toggle.
-  const drawModeEnabledRef = useRef(false)
+  // Mirrors so the chart click handler sees the latest values without
+  // re-subscribing on every toggle.
+  const activeToolRef = useRef<DrawTool>('cursor')
+  const snapEnabledRef = useRef(true)
+  const drawnLinesRef = useRef<DrawnLine[]>([])
+  const selectedLineIdRef = useRef<string | null>(null)
+  const swingsRef = useRef<{ highs: SwingPoint[]; lows: SwingPoint[] }>({ highs: [], lows: [] })
+  const visibleCandlesRef = useRef<Candle[]>([])
 
   // ---------- incremental-render bookkeeping ----------
   // Track last-rendered length + end time per series so we can call
@@ -120,10 +140,15 @@ export default function TradingResearchSandbox() {
   const [emaEnabled, setEmaEnabled] = useState(true)
   const [emaLength, setEmaLength] = useState(21)
   const [trendlineEnabled, setTrendlineEnabled] = useState(true)
-  const [drawModeEnabled, setDrawModeEnabled] = useState(false)
-  const [drawnLines, setDrawnLines] = useState<
-    Array<{ t1: number; p1: number; t2: number; p2: number }>
-  >([])
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    if (typeof window === 'undefined') return 'dark'
+    return localStorage.getItem('xau:theme') === 'light' ? 'light' : 'dark'
+  })
+  const colors = palettes[themeMode]
+  const [activeTool, setActiveTool] = useState<DrawTool>('cursor')
+  const [snapEnabled, setSnapEnabled] = useState(true)
+  const [drawnLines, setDrawnLines] = useState<DrawnLine[]>([])
+  const [selectedLineId, setSelectedLineId] = useState<string | null>(null)
   const [strategyEnabled, setStrategyEnabled] = useState(true)
   const [lotSize, setLotSize] = useState(0.01)
   const [startingBalance, setStartingBalance] = useState(100)
@@ -321,23 +346,24 @@ export default function TradingResearchSandbox() {
   useEffect(() => {
     if (!priceContainerRef.current || !cvdContainerRef.current) return
 
+    const initialColors = palettes[themeMode]
     const commonOpts = {
       layout: {
-        background: { color: theme.panel },
-        textColor: theme.text,
+        background: { color: initialColors.panel },
+        textColor: initialColors.text,
         fontSize: 11,
         fontFamily: fonts.sans,
       },
       grid: {
-        vertLines: { color: theme.border, style: LineStyle.Dotted },
-        horzLines: { color: theme.border, style: LineStyle.Dotted },
+        vertLines: { color: initialColors.border, style: LineStyle.Dotted },
+        horzLines: { color: initialColors.border, style: LineStyle.Dotted },
       },
-      rightPriceScale: { borderColor: theme.border },
+      rightPriceScale: { borderColor: initialColors.border },
       localization: {
         timeFormatter: (t: Time) => formatCrosshair(t as number),
       },
       timeScale: {
-        borderColor: theme.border,
+        borderColor: initialColors.border,
         timeVisible: true,
         secondsVisible: false,
         tickMarkFormatter: (time: Time, tickMarkType: number) =>
@@ -346,16 +372,16 @@ export default function TradingResearchSandbox() {
       crosshair: {
         mode: CrosshairMode.Normal,
         vertLine: {
-          color: theme.borderStrong,
+          color: initialColors.borderStrong,
           width: 1 as const,
           style: LineStyle.Solid,
-          labelBackgroundColor: theme.borderStrong,
+          labelBackgroundColor: initialColors.borderStrong,
         },
         horzLine: {
-          color: theme.borderStrong,
+          color: initialColors.borderStrong,
           width: 1 as const,
           style: LineStyle.Solid,
-          labelBackgroundColor: theme.borderStrong,
+          labelBackgroundColor: initialColors.borderStrong,
         },
       },
       handleScroll: true,
@@ -376,17 +402,17 @@ export default function TradingResearchSandbox() {
     priceChart.applyOptions({ timeScale: { visible: false } })
 
     const candle = priceChart.addCandlestickSeries({
-      upColor: theme.up,
-      downColor: theme.down,
-      borderUpColor: theme.up,
-      borderDownColor: theme.down,
-      wickUpColor: theme.up,
-      wickDownColor: theme.down,
+      upColor: initialColors.up,
+      downColor: initialColors.down,
+      borderUpColor: initialColors.up,
+      borderDownColor: initialColors.down,
+      wickUpColor: initialColors.up,
+      wickDownColor: initialColors.down,
       priceFormat: { type: 'price', precision: 3, minMove: 0.001 },
     })
 
     const ema = priceChart.addLineSeries({
-      color: theme.warn,
+      color: initialColors.warn,
       lineWidth: 1,
       priceLineVisible: false,
       lastValueVisible: true,
@@ -394,24 +420,25 @@ export default function TradingResearchSandbox() {
     })
 
     const cvd = cvdChart.addCandlestickSeries({
-      upColor: theme.up,
-      downColor: theme.down,
-      borderUpColor: theme.up,
-      borderDownColor: theme.down,
-      wickUpColor: theme.up,
-      wickDownColor: theme.down,
+      upColor: initialColors.up,
+      downColor: initialColors.down,
+      borderUpColor: initialColors.up,
+      borderDownColor: initialColors.down,
+      wickUpColor: initialColors.up,
+      wickDownColor: initialColors.down,
       priceFormat: { type: 'volume' },
       priceLineVisible: false,
     })
 
-    cvd.createPriceLine({
+    const cvdZeroLine = cvd.createPriceLine({
       price: 0,
-      color: theme.textInactive,
+      color: initialColors.textInactive,
       lineStyle: LineStyle.Dashed,
       lineWidth: 1,
       axisLabelVisible: false,
       title: '',
     })
+    cvdZeroLineRef.current = cvdZeroLine
 
     priceChartRef.current = priceChart
     cvdChartRef.current = cvdChart
@@ -482,12 +509,14 @@ export default function TradingResearchSandbox() {
     priceChart.subscribeCrosshairMove(syncFromPrice)
     cvdChart.subscribeCrosshairMove(syncFromCvd)
 
-    // ----- draw mode: 2 clicks → log + render a line on price chart -----
+    // ----- draw mode: routes by active tool. -----
+    // Cursor   → hit-test drawn lines, set selection.
+    // Trendline → 2 clicks (with snap), commit a DrawnLine.
+    // Horizontal → 1 click (with price snap), commit a horizontal extending right.
     const onPriceClick = (param: MouseEventParams) => {
-      if (!drawModeEnabledRef.current) return
+      const tool = activeToolRef.current
       const series = candleSeriesRef.current
       if (!series || !param.point) return
-      // Time: from the bar under cursor, falling back to time scale lookup
       let time: number | null = null
       if (param.time !== undefined) {
         time = param.time as number
@@ -496,27 +525,72 @@ export default function TradingResearchSandbox() {
         if (typeof t === 'number') time = t
       }
       if (time === null) return
-      const price = series.coordinateToPrice(param.point.y)
-      if (price === null) return
+      const rawPrice = series.coordinateToPrice(param.point.y)
+      if (rawPrice === null) return
 
-      if (drawWorkingRef.current === null) {
-        drawWorkingRef.current = { time, price }
+      if (tool === 'cursor') {
+        const px = param.point.x
+        const py = param.point.y
+        const lines = drawnLinesRef.current
+        for (let i = lines.length - 1; i >= 0; i--) {
+          if (hitTestLine(px, py, lines[i], priceChart, series)) {
+            setSelectedLineId(lines[i].id)
+            return
+          }
+        }
+        setSelectedLineId(null)
+        return
+      }
+
+      const snapped = snapEnabledRef.current
+        ? snapToNearestPivot(
+            time, rawPrice,
+            swingsRef.current.highs, swingsRef.current.lows,
+            visibleCandlesRef.current,
+            priceChart, series,
+          )
+        : { time, price: rawPrice, source: null, deltaPx: null }
+      const snapTag = snapped.source
+        ? ` snap=${snapped.source}@${snapped.price.toFixed(3)} Δ${snapped.deltaPx!.toFixed(1)}px`
+        : ''
+
+      if (tool === 'horizontal') {
+        const line: DrawnLine = {
+          id: nextLineId(),
+          tool: 'horizontal',
+          t1: snapped.time, p1: snapped.price,
+          t2: snapped.time + HORIZONTAL_EXTEND_SEC, p2: snapped.price,
+        }
         // eslint-disable-next-line no-console
-        console.log(`[draw] anchor1 t=${formatCrosshair(time)} p=${price.toFixed(3)}`)
+        console.log(
+          `[draw] line tool=horizontal p=${snapped.price.toFixed(3)} t=${formatCrosshair(snapped.time)}${snapTag}`,
+        )
+        setDrawnLines((lines) => [...lines, line])
+        return
+      }
+
+      // trendline: two-click flow
+      if (drawWorkingRef.current === null) {
+        drawWorkingRef.current = { time: snapped.time, price: snapped.price }
+        // eslint-disable-next-line no-console
+        console.log(
+          `[draw] anchor1 t=${formatCrosshair(snapped.time)} p=${snapped.price.toFixed(3)}${snapTag}`,
+        )
         return
       }
       const a = drawWorkingRef.current
-      const b = { time, price }
+      const b = { time: snapped.time, price: snapped.price }
       drawWorkingRef.current = null
       const dt = b.time - a.time
       const dp = b.price - a.price
+      const slopeH = dt !== 0 ? ((dp / dt) * 3600).toFixed(3) : 'inf'
       // eslint-disable-next-line no-console
       console.log(
-        `[draw] line a=${formatCrosshair(a.time)}@${a.price.toFixed(3)} b=${formatCrosshair(b.time)}@${b.price.toFixed(3)} dt=${dt}s dp=${dp.toFixed(3)} slope/h=${((dp / dt) * 3600).toFixed(3)}`,
+        `[draw] line tool=trendline a=${formatCrosshair(a.time)}@${a.price.toFixed(3)} b=${formatCrosshair(b.time)}@${b.price.toFixed(3)} dt=${dt}s dp=${dp.toFixed(3)} slope/h=${slopeH}${snapTag}`,
       )
       setDrawnLines((lines) => [
         ...lines,
-        { t1: a.time, p1: a.price, t2: b.time, p2: b.price },
+        { id: nextLineId(), tool: 'trendline', t1: a.time, p1: a.price, t2: b.time, p2: b.price },
       ])
     }
     priceChart.subscribeClick(onPriceClick)
@@ -551,9 +625,10 @@ export default function TradingResearchSandbox() {
       cvdChartRef.current = null
       candleSeriesRef.current = null
       cvdSeriesRef.current = null
+      cvdZeroLineRef.current = null
       emaSeriesRef.current = null
       channelsSeriesPoolRef.current = []
-      drawnSeriesPoolRef.current = []
+      drawnRenderMapRef.current.clear()
       setChartsReady(false)
     }
   }, [])
@@ -702,14 +777,14 @@ export default function TradingResearchSandbox() {
     while (pool.length < channels.length) {
       pool.push({
         res: chart.addLineSeries({
-          color: theme.accent,
+          color: colors.accent,
           lineWidth: 2,
           priceLineVisible: false,
           lastValueVisible: false,
           crosshairMarkerVisible: false,
         }),
         sup: chart.addLineSeries({
-          color: theme.accent,
+          color: colors.accent,
           lineWidth: 2,
           priceLineVisible: false,
           lastValueVisible: false,
@@ -737,41 +812,183 @@ export default function TradingResearchSandbox() {
     }
   }, [visibleCandles, trendlineEnabled, chartsReady])
 
-  // Mirror draw mode + clear pending anchor when toggled off.
+  // Mirror tool state into refs for the chart click handler.
+  // Switching away from trendline mid-draw clears the pending anchor.
+  // Switching away from cursor clears the selection.
   useEffect(() => {
-    drawModeEnabledRef.current = drawModeEnabled
-    if (!drawModeEnabled) drawWorkingRef.current = null
-  }, [drawModeEnabled])
+    activeToolRef.current = activeTool
+    if (activeTool !== 'trendline') drawWorkingRef.current = null
+    if (activeTool !== 'cursor') setSelectedLineId(null)
+  }, [activeTool])
 
-  // Render user-drawn lines as yellow LineSeries on the price chart.
+  useEffect(() => { snapEnabledRef.current = snapEnabled }, [snapEnabled])
+  useEffect(() => { drawnLinesRef.current = drawnLines }, [drawnLines])
+  useEffect(() => { selectedLineIdRef.current = selectedLineId }, [selectedLineId])
+  useEffect(() => { visibleCandlesRef.current = visibleCandles }, [visibleCandles])
+
+  // Swings always computed (independent of the trendline overlay toggle) so
+  // the draw-tool snap can target them at any time.
+  const drawSwings = useMemo(() => ({
+    highs: findSwingHighs(visibleCandles, TRENDLINE_LOOKBACK),
+    lows: findSwingLows(visibleCandles, TRENDLINE_LOOKBACK),
+  }), [visibleCandles])
+  useEffect(() => { swingsRef.current = drawSwings }, [drawSwings])
+
+  // ---------- theme sync ----------
+  // Updates the document attribute (so CSS vars switch palette), persists
+  // the choice, syncs the Electron title-bar overlay, and re-applies all
+  // chart-side colors that can't be CSS variables.
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode
+    try { localStorage.setItem('xau:theme', themeMode) } catch (_) { /* noop */ }
+    window.electronAPI?.setTheme(themeMode).catch(() => { /* not in electron */ })
+
+    const c = palettes[themeMode]
+    const layoutOpts = {
+      layout: { background: { color: c.panel }, textColor: c.text },
+      grid: {
+        vertLines: { color: c.border, style: LineStyle.Dotted },
+        horzLines: { color: c.border, style: LineStyle.Dotted },
+      },
+      rightPriceScale: { borderColor: c.border },
+      timeScale: { borderColor: c.border },
+      crosshair: {
+        vertLine: { color: c.borderStrong, labelBackgroundColor: c.borderStrong },
+        horzLine: { color: c.borderStrong, labelBackgroundColor: c.borderStrong },
+      },
+    }
+    priceChartRef.current?.applyOptions(layoutOpts)
+    cvdChartRef.current?.applyOptions(layoutOpts)
+
+    const candleOpts = {
+      upColor: c.up, downColor: c.down,
+      borderUpColor: c.up, borderDownColor: c.down,
+      wickUpColor: c.up, wickDownColor: c.down,
+    }
+    candleSeriesRef.current?.applyOptions(candleOpts)
+    cvdSeriesRef.current?.applyOptions(candleOpts)
+    emaSeriesRef.current?.applyOptions({ color: c.warn })
+    cvdZeroLineRef.current?.applyOptions({ color: c.textInactive })
+
+    for (const pair of channelsSeriesPoolRef.current) {
+      pair.res.applyOptions({ color: c.accent })
+      pair.sup.applyOptions({ color: c.accent })
+    }
+    for (const handle of drawnRenderMapRef.current.values()) {
+      handle.api.applyOptions({ color: c.warn })
+    }
+  }, [themeMode])
+
+  const toggleTheme = () => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))
+
+  // ---------- keyboard: draw tool shortcuts ----------
+  // V cursor · T trendline · H horizontal · S snap toggle
+  // Esc clears working anchor + deselects · Del/Backspace removes selection
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      switch (e.key) {
+        case 'v': case 'V':
+          setActiveTool('cursor'); return
+        case 't': case 'T':
+          setActiveTool('trendline'); return
+        case 'h': case 'H':
+          setActiveTool('horizontal'); return
+        case 's': case 'S':
+          setSnapEnabled((v) => !v); return
+        case 'Escape':
+          drawWorkingRef.current = null
+          setSelectedLineId(null)
+          setActiveTool('cursor')
+          return
+        case 'Delete': case 'Backspace': {
+          const id = selectedLineIdRef.current
+          if (!id) return
+          e.preventDefault()
+          setDrawnLines((lines) => lines.filter((l) => l.id !== id))
+          setSelectedLineId(null)
+          // eslint-disable-next-line no-console
+          console.log(`[draw] delete id=${id}`)
+          return
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  // Render user-drawn lines. Keyed by line.id, mixing LineSeries (trendlines)
+  // and priceLine (horizontals) so different shapes coexist cleanly.
+  // The selected line gets a thicker stroke; others render at lineWidth 2.
   useEffect(() => {
     const chart = priceChartRef.current
-    if (!chart) return
-    const pool = drawnSeriesPoolRef.current
-    while (pool.length < drawnLines.length) {
-      pool.push(
-        chart.addLineSeries({
-          color: theme.warn,
-          lineWidth: 2,
+    const candleSeries = candleSeriesRef.current
+    if (!chart || !candleSeries) return
+    const map = drawnRenderMapRef.current
+    const currentIds = new Set(drawnLines.map((l) => l.id))
+
+    for (const [id, handle] of map) {
+      if (currentIds.has(id)) continue
+      if (handle.kind === 'line') chart.removeSeries(handle.api)
+      else candleSeries.removePriceLine(handle.api)
+      map.delete(id)
+    }
+
+    for (const line of drawnLines) {
+      const isSelected = line.id === selectedLineId
+      const width = isSelected ? 3 : 2
+
+      if (line.tool === 'horizontal') {
+        const existing = map.get(line.id)
+        if (existing && existing.kind === 'priceLine') {
+          existing.api.applyOptions({ price: line.p1, color: colors.warn, lineWidth: width as 1 | 2 | 3 | 4 })
+        } else {
+          if (existing && existing.kind === 'line') chart.removeSeries(existing.api)
+          const pl = candleSeries.createPriceLine({
+            price: line.p1,
+            color: colors.warn,
+            lineWidth: width as 1 | 2 | 3 | 4,
+            lineStyle: LineStyle.Solid,
+            axisLabelVisible: false,
+            title: '',
+          })
+          map.set(line.id, { kind: 'priceLine', api: pl })
+        }
+        continue
+      }
+
+      // trendline
+      let handle = map.get(line.id)
+      if (handle && handle.kind === 'priceLine') {
+        candleSeries.removePriceLine(handle.api)
+        handle = undefined
+        map.delete(line.id)
+      }
+      let series: ISeriesApi<'Line'>
+      if (handle && handle.kind === 'line') {
+        series = handle.api
+        series.applyOptions({ color: colors.warn, lineWidth: width as 1 | 2 | 3 | 4 })
+      } else {
+        series = chart.addLineSeries({
+          color: colors.warn,
+          lineWidth: width as 1 | 2 | 3 | 4,
           priceLineVisible: false,
           lastValueVisible: false,
           crosshairMarkerVisible: false,
-        }),
-      )
-    }
-    for (let i = 0; i < drawnLines.length; i++) {
-      const l = drawnLines[i]
+        })
+        map.set(line.id, { kind: 'line', api: series })
+      }
       const [first, second] =
-        l.t1 <= l.t2 ? [{ t: l.t1, v: l.p1 }, { t: l.t2, v: l.p2 }] : [{ t: l.t2, v: l.p2 }, { t: l.t1, v: l.p1 }]
-      pool[i].setData([
+        line.t1 <= line.t2
+          ? [{ t: line.t1, v: line.p1 }, { t: line.t2, v: line.p2 }]
+          : [{ t: line.t2, v: line.p2 }, { t: line.t1, v: line.p1 }]
+      series.setData([
         { time: first.t as Time, value: first.v },
         { time: second.t as Time, value: second.v },
       ])
     }
-    for (let i = drawnLines.length; i < pool.length; i++) {
-      pool[i].setData([])
-    }
-  }, [drawnLines, chartsReady])
+  }, [drawnLines, selectedLineId, chartsReady])
 
   // ---------- Strategy signals (computed on the visible slice only) ----------
   const signals = useMemo(
@@ -792,12 +1009,12 @@ export default function TradingResearchSandbox() {
     const markers: SeriesMarker<Time>[] = signals.map((s) => ({
       time: s.time,
       position: s.side === 'buy' ? 'belowBar' : 'aboveBar',
-      color: s.side === 'buy' ? theme.up : theme.down,
+      color: s.side === 'buy' ? colors.up : colors.down,
       shape: s.side === 'buy' ? 'arrowUp' : 'arrowDown',
       text: s.label,
     }))
     cs.setMarkers(markers)
-  }, [signals, chartsReady])
+  }, [signals, chartsReady, themeMode])
 
   // ---------- re-apply pinned range after timeframe / dataset switch ----------
   useEffect(() => {
@@ -883,6 +1100,8 @@ export default function TradingResearchSandbox() {
         replaySpeed={replaySpeed}
         onReplaySpeedChange={setReplaySpeed}
         replayNowSec={replayWindow[replayPlayhead]?.time as number | undefined}
+        themeMode={themeMode}
+        onThemeToggle={toggleTheme}
       />
 
       <div style={styles.middle}>
@@ -901,10 +1120,6 @@ export default function TradingResearchSandbox() {
           onSessionsEnabledChange={setSessionsEnabled}
           trendlineEnabled={trendlineEnabled}
           onTrendlineEnabledChange={setTrendlineEnabled}
-          drawModeEnabled={drawModeEnabled}
-          onDrawModeEnabledChange={setDrawModeEnabled}
-          drawnLineCount={drawnLines.length}
-          onClearDrawnLines={() => setDrawnLines([])}
           strategyEnabled={strategyEnabled}
           onStrategyEnabledChange={setStrategyEnabled}
           signalCount={signals.length}
@@ -924,6 +1139,14 @@ export default function TradingResearchSandbox() {
                 showLabels={showSessionLabels}
               />
             )}
+            <DrawToolbar
+              activeTool={activeTool}
+              onActiveToolChange={setActiveTool}
+              snapEnabled={snapEnabled}
+              onSnapEnabledChange={setSnapEnabled}
+              lineCount={drawnLines.length}
+              onClearAll={() => { setDrawnLines([]); setSelectedLineId(null) }}
+            />
           </div>
 
           <PaneHeader label="CVD" />
