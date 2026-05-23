@@ -14,9 +14,8 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts'
 
-import { theme, fonts, sizes, palettes, type ThemeMode } from '../theme'
-import type { Candle, CvdCandle, DatasetBundle, Timeframe } from '../types'
-import { buildM1Bundle, buildM5Bundle, loadCsv, MOCK_M1, MOCK_M5 } from '../data'
+import { theme, fonts, sizes, palettes } from '../theme'
+import type { Candle, Timeframe } from '../types'
 import { computeEma } from '../engine/indicators'
 import { runPriceActionBeta } from '../engine/priceActionBeta'
 import { computeStats } from '../engine/portfolio'
@@ -32,6 +31,9 @@ import {
   type DrawnLine,
 } from '../engine/drawing'
 import { formatAxisTick, formatCrosshair, parseCasaLocalToUtcSec } from '../util/time'
+import { useReplayController } from '../hooks/useReplayController'
+import { useDatasets } from '../hooks/useDatasets'
+import { useThemeSync } from '../hooks/useThemeSync'
 
 const DEFAULT_RANGE_START_CASA = '2026-05-21 00:00'
 const DEFAULT_RANGE_END_CASA = '2026-05-21 20:00'
@@ -43,28 +45,6 @@ const DEFAULT_RANGE = {
 // Lookback for swing-high detection. Smaller → more pivots → more touch
 // candidates for the scoring algorithm; trades responsiveness for noise.
 const TRENDLINE_LOOKBACK = 7
-
-/**
- * Largest index `i` such that `window[i].time <= t`.
- * - t === null → window.length - 1 (default: show everything)
- * - t before window start → 0
- * - t after window end → window.length - 1
- */
-function findIndexForTime(window: ReadonlyArray<Candle>, t: number | null): number {
-  const n = window.length
-  if (n === 0) return 0
-  if (t === null) return n - 1
-  if ((window[0].time as number) > t) return 0
-  if ((window[n - 1].time as number) <= t) return n - 1
-  let lo = 0
-  let hi = n - 1
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2)
-    if ((window[mid].time as number) <= t) lo = mid
-    else hi = mid - 1
-  }
-  return lo
-}
 
 import TopBar from './TopBar'
 import LeftNav from './LeftNav'
@@ -107,7 +87,6 @@ export default function TradingResearchSandbox() {
   const drawnLinesRef = useRef<DrawnLine[]>([])
   const selectedLineIdRef = useRef<string | null>(null)
   const swingsRef = useRef<{ highs: SwingPoint[]; lows: SwingPoint[] }>({ highs: [], lows: [] })
-  const visibleCandlesRef = useRef<Candle[]>([])
 
   // ---------- incremental-render bookkeeping ----------
   // Track last-rendered length + end time per series so we can call
@@ -122,12 +101,7 @@ export default function TradingResearchSandbox() {
   const lastEmaSettingsRef = useRef<{ length: number; enabled: boolean }>({ length: 0, enabled: false })
 
   // ---------- data state ----------
-  const [timeframe, setTimeframe] = useState<Timeframe>('1m')
-  const [data1m, setData1m] = useState<DatasetBundle>(MOCK_M1)
-  const [data5m, setData5m] = useState<DatasetBundle>(MOCK_M5)
-  const [loadStatus, setLoadStatus] = useState<'loading' | 'real' | 'mock' | 'error'>('loading')
-
-  const active = timeframe === '1m' ? data1m : data5m
+  const { timeframe, setTimeframe, active, loadStatus } = useDatasets()
 
   // ---------- ui state ----------
   const [hoveredTime, setHoveredTime] = useState<number | null>(null)
@@ -140,11 +114,7 @@ export default function TradingResearchSandbox() {
   const [emaEnabled, setEmaEnabled] = useState(true)
   const [emaLength, setEmaLength] = useState(21)
   const [trendlineEnabled, setTrendlineEnabled] = useState(true)
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
-    if (typeof window === 'undefined') return 'dark'
-    return localStorage.getItem('xau:theme') === 'light' ? 'light' : 'dark'
-  })
-  const colors = palettes[themeMode]
+  const { themeMode, setThemeMode, toggleTheme, colors } = useThemeSync()
   const [activeTool, setActiveTool] = useState<DrawTool>('cursor')
   const [snapEnabled, setSnapEnabled] = useState(true)
   // Kind-level visibility — toggling Resistance off skips detection of
@@ -159,163 +129,24 @@ export default function TradingResearchSandbox() {
   const [lotSize, setLotSize] = useState(0.01)
   const [startingBalance, setStartingBalance] = useState(100)
   const [appliedRange, setAppliedRange] = useState<{ from: number; to: number } | null>(DEFAULT_RANGE)
-  const [replayPlaying, setReplayPlaying] = useState(false)
-  // Time anchor for replay playhead (UTC sec). null = "show everything"
-  // default. Tracking time (not index) makes TF switches seamless: the
-  // derived index recomputes against whichever TF's bar grid is active.
-  const [replayPlayheadTime, setReplayPlayheadTime] = useState<number | null>(null)
-  const [replaySpeed, setReplaySpeed] = useState(4) // bars per second
   // Force SessionOverlay to remount/re-read refs once charts exist.
   const [chartsReady, setChartsReady] = useState(false)
 
-  // ---------- replay slicing ----------
-  const replayWindow = useMemo<Candle[]>(() => {
-    if (!appliedRange) return active.candles
-    return active.candles.filter(
-      (c) => (c.time as number) >= appliedRange.from && (c.time as number) <= appliedRange.to,
-    )
-  }, [active.candles, appliedRange])
-
-  const replayCvdWindow = useMemo<CvdCandle[]>(() => {
-    if (!appliedRange) return active.cvd
-    return active.cvd.filter(
-      (c) => (c.time as number) >= appliedRange.from && (c.time as number) <= appliedRange.to,
-    )
-  }, [active.cvd, appliedRange])
-
-  // Derived index from the time anchor — TF switch reuses the same time and
-  // gets a fresh index against the new bar grid.
-  const replayPlayhead = useMemo(
-    () => findIndexForTime(replayWindow, replayPlayheadTime),
-    [replayWindow, replayPlayheadTime],
-  )
-
-  // appliedRange change → clear anchor (re-defaults to "show everything")
-  // and pause. This is a fresh-start gesture; TF switch is NOT this.
-  useEffect(() => {
-    setReplayPlayheadTime(null)
-    setReplayPlaying(false)
-  }, [appliedRange])
-
-  // On window change (TF switch or data load): if the anchor falls outside
-  // the new window's time range, snap it to the last bar and pause. Anchor
-  // *inside* the range is preserved, so TF switching is seamless.
-  useEffect(() => {
-    if (replayPlayheadTime === null) return
-    if (replayWindow.length === 0) return
-    const firstTime = replayWindow[0].time as number
-    const lastTime = replayWindow[replayWindow.length - 1].time as number
-    if (replayPlayheadTime < firstTime || replayPlayheadTime > lastTime) {
-      setReplayPlayheadTime(lastTime)
-      setReplayPlaying(false)
-    }
-  }, [replayWindow, replayPlayheadTime])
-
-  const visibleCandles = useMemo<Candle[]>(() => {
-    if (replayWindow.length === 0) return []
-    const end = Math.min(replayPlayhead + 1, replayWindow.length)
-    return replayWindow.slice(0, end)
-  }, [replayWindow, replayPlayhead])
-
-  const visibleCvd = useMemo<CvdCandle[]>(() => {
-    if (visibleCandles.length === 0) return []
-    const cutoff = visibleCandles[visibleCandles.length - 1].time as number
-    return replayCvdWindow.filter((c) => (c.time as number) <= cutoff)
-  }, [replayCvdWindow, visibleCandles])
-
-  // Read latest playheadTime inside the interval without re-subscribing each
-  // tick — keeping replayPlayheadTime out of the deps below.
-  const playheadTimeRef = useRef<number | null>(replayPlayheadTime)
-  playheadTimeRef.current = replayPlayheadTime
-
-  // playback tick — advance the time anchor to the next bar in the window
-  useEffect(() => {
-    if (!replayPlaying) return
-    if (replayWindow.length === 0) return
-    const intervalMs = Math.max(16, Math.round(1000 / Math.max(1, replaySpeed)))
-    const id = window.setInterval(() => {
-      const currentIdx = findIndexForTime(replayWindow, playheadTimeRef.current)
-      if (currentIdx >= replayWindow.length - 1) {
-        setReplayPlaying(false)
-        return
-      }
-      setReplayPlayheadTime(replayWindow[currentIdx + 1].time as number)
-    }, intervalMs)
-    return () => window.clearInterval(id)
-  }, [replayPlaying, replaySpeed, replayWindow])
-
-  // keyboard shortcuts: Space play/pause, ←/→ step (Shift = 10),
-  // Home reset, End jump to window end. Skipped while typing in an input.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return
-      if (replayWindow.length === 0) return
-      const max = replayWindow.length - 1
-      const stepTo = (delta: number) => {
-        const idx = findIndexForTime(replayWindow, playheadTimeRef.current)
-        const next = Math.max(0, Math.min(max, idx + delta))
-        setReplayPlaying(false)
-        setReplayPlayheadTime(replayWindow[next].time as number)
-      }
-      switch (e.key) {
-        case ' ':
-          e.preventDefault()
-          setReplayPlaying((p) => !p)
-          return
-        case 'ArrowLeft':
-          e.preventDefault()
-          stepTo(e.shiftKey ? -10 : -1)
-          return
-        case 'ArrowRight':
-          e.preventDefault()
-          stepTo(e.shiftKey ? 10 : 1)
-          return
-        case 'Home':
-          e.preventDefault()
-          setReplayPlaying(false)
-          setReplayPlayheadTime(replayWindow[0].time as number)
-          return
-        case 'End':
-          e.preventDefault()
-          setReplayPlaying(false)
-          setReplayPlayheadTime(replayWindow[max].time as number)
-          return
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [replayWindow])
-
-  // ---------- logging for the session.log bridge ----------
-  const prevPlayingRef = useRef(false)
-  useEffect(() => {
-    const t = playheadTimeRef.current
-    const tStr = t !== null ? formatCrosshair(t) : 'unknown'
-    if (replayPlaying && !prevPlayingRef.current) {
-      // eslint-disable-next-line no-console
-      console.log(`[replay] play from ${tStr}`)
-    } else if (!replayPlaying && prevPlayingRef.current) {
-      // eslint-disable-next-line no-console
-      console.log(`[replay] pause at ${tStr}`)
-    }
-    prevPlayingRef.current = replayPlaying
-  }, [replayPlaying])
-
-  useEffect(() => {
-    // eslint-disable-next-line no-console
-    console.log(`[replay] speed ${replaySpeed}×`)
-  }, [replaySpeed])
-
-  useEffect(() => {
-    if (!appliedRange) {
-      // eslint-disable-next-line no-console
-      console.log('[replay] range cleared')
-    } else {
-      // eslint-disable-next-line no-console
-      console.log(`[replay] range ${formatCrosshair(appliedRange.from)} → ${formatCrosshair(appliedRange.to)}`)
-    }
-  }, [appliedRange])
+  // ---------- replay ----------
+  const {
+    replayWindow,
+    replayCvdWindow,
+    visibleCandles,
+    visibleCvd,
+    replayPlayhead,
+    replayPlayheadTime,
+    setReplayPlayheadTime,
+    replayPlaying,
+    setReplayPlaying,
+    replaySpeed,
+    setReplaySpeed,
+    visibleCandlesRef,
+  } = useReplayController(active, appliedRange)
 
   // ---------- lookup map for hover → candle ----------
   const candleByTime = useMemo(() => {
@@ -324,29 +155,6 @@ export default function TradingResearchSandbox() {
     return m
   }, [active])
   const hoveredCandle = hoveredTime === null ? null : candleByTime.get(hoveredTime) ?? null
-
-  // ---------- load CSVs once ----------
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const [m1Rows, m5Rows] = await Promise.all([
-          loadCsv('./data/xauusd_m1.csv'),
-          loadCsv('./data/xauusd_m5.csv'),
-        ])
-        if (cancelled) return
-        setData1m(buildM1Bundle(m1Rows))
-        setData5m(buildM5Bundle(m5Rows, m1Rows))
-        setLoadStatus('real')
-      } catch (e) {
-        console.warn('CSV load failed, using mock data:', e)
-        if (!cancelled) setLoadStatus('mock')
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   // ---------- create charts (once) ----------
   useEffect(() => {
@@ -829,17 +637,11 @@ export default function TradingResearchSandbox() {
   useEffect(() => { snapEnabledRef.current = snapEnabled }, [snapEnabled])
   useEffect(() => { drawnLinesRef.current = drawnLines }, [drawnLines])
   useEffect(() => { selectedLineIdRef.current = selectedLineId }, [selectedLineId])
-  useEffect(() => { visibleCandlesRef.current = visibleCandles }, [visibleCandles])
 
-  // ---------- theme sync ----------
-  // Updates the document attribute (so CSS vars switch palette), persists
-  // the choice, syncs the Electron title-bar overlay, and re-applies all
-  // chart-side colors that can't be CSS variables.
+  // ---------- chart-side theme re-apply ----------
+  // DOM/localStorage/IPC sync lives in useThemeSync; this effect only
+  // re-applies the hex colors that lightweight-charts can't resolve as CSS vars.
   useEffect(() => {
-    document.documentElement.dataset.theme = themeMode
-    try { localStorage.setItem('xau:theme', themeMode) } catch (_) { /* noop */ }
-    window.electronAPI?.setTheme(themeMode).catch(() => { /* not in electron */ })
-
     const c = palettes[themeMode]
     const layoutOpts = {
       layout: { background: { color: c.panel }, textColor: c.text },
@@ -875,8 +677,6 @@ export default function TradingResearchSandbox() {
       handle.api.applyOptions({ color: c.warn })
     }
   }, [themeMode])
-
-  const toggleTheme = () => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))
 
   const toggleChannelHidden = (sig: string) => {
     setHiddenChannelSigs((prev) => {
