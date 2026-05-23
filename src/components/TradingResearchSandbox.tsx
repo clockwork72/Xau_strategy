@@ -20,7 +20,7 @@ import { computeEma } from '../engine/indicators'
 import { runPriceActionBeta } from '../engine/priceActionBeta'
 import { computeStats } from '../engine/portfolio'
 import { findSwingHighs, findSwingLows, type SwingPoint } from '../engine/swings'
-import { pickChannels, withChannelMeta, type ChannelMeta } from '../engine/trendlines'
+import { extendChannelToTime, pickChannels, withChannelMeta, type ChannelMeta } from '../engine/trendlines'
 import type { SessionToggles } from '../engine/sessions'
 import {
   HORIZONTAL_EXTEND_SEC,
@@ -558,7 +558,13 @@ export default function TradingResearchSandbox() {
     // Re-enable by sorting all candidates by (endTime - startTime) desc and
     // dropping any that overlaps an already-accepted one in time.
     // ---- /DISABLED ----
-    return withChannelMeta(channels)
+    // Extend rails forward to the current replay edge, post-sig so the
+    // per-channel hide rows keep their anchor-based keys.
+    const lastTime = visibleCandles[visibleCandles.length - 1].time as number
+    return withChannelMeta(channels).map((m) => ({
+      ...m,
+      channel: extendChannelToTime(m.channel, lastTime),
+    }))
   }, [drawSwings, trendlineEnabled, visibleCandles, showResistance, showSupport])
 
   useEffect(() => {

@@ -32,6 +32,26 @@ export function channelSignature(c: Pick<Channel, 'kind' | 'startTime' | 'endTim
   return `${c.kind}|${c.startTime}|${c.endTime}`
 }
 
+/**
+ * Extrapolate both rails forward to `t` along the channel's existing slope.
+ * No-op if `t` is at-or-before the channel's current end. Call this AFTER
+ * `withChannelMeta` so the signature stays anchored to the detection endpoints
+ * (otherwise sig would change every replay tick and break per-channel hide rows).
+ */
+export function extendChannelToTime(c: Channel, t: number): Channel {
+  if (t <= c.endTime) return c
+  const dt = c.endTime - c.startTime
+  if (dt <= 0) return c
+  const slope = (c.upperEnd - c.upperStart) / dt
+  const ext = t - c.endTime
+  return {
+    ...c,
+    endTime: t,
+    upperEnd: c.upperEnd + slope * ext,
+    lowerEnd: c.lowerEnd + slope * ext,
+  }
+}
+
 export function withChannelMeta(channels: ReadonlyArray<Channel>): ChannelMeta[] {
   let resCount = 0
   let supCount = 0
