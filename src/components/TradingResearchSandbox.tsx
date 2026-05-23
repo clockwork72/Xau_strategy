@@ -16,7 +16,7 @@ import {
 
 import { theme, fonts, sizes, palettes, type ThemeMode } from '../theme'
 import type { Candle, CvdCandle, DatasetBundle, Timeframe } from '../types'
-import { loadCsv, MOCK_M1, MOCK_M5, rowsToBundle } from '../data'
+import { buildM1Bundle, buildM5Bundle, loadCsv, MOCK_M1, MOCK_M5 } from '../data'
 import { computeEma } from '../engine/indicators'
 import { runPriceActionBeta } from '../engine/priceActionBeta'
 import { computeStats } from '../engine/portfolio'
@@ -335,8 +335,8 @@ export default function TradingResearchSandbox() {
           loadCsv('./data/xauusd_m5.csv'),
         ])
         if (cancelled) return
-        setData1m(rowsToBundle(m1Rows))
-        setData5m(rowsToBundle(m5Rows))
+        setData1m(buildM1Bundle(m1Rows))
+        setData5m(buildM5Bundle(m5Rows, m1Rows))
         setLoadStatus('real')
       } catch (e) {
         console.warn('CSV load failed, using mock data:', e)
