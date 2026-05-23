@@ -16,9 +16,9 @@ interface Props {
   onStartingBalanceChange: (n: number) => void
   markPrice: number | null
   channelsMeta: ChannelMeta[]
-  showResistance: boolean
-  showSupport: boolean
-  onToggleChannelKind: (kind: 'resistance' | 'support') => void
+  hiddenChannelSigs: ReadonlySet<string>
+  onToggleChannelHidden: (sig: string) => void
+  onClearHiddenChannels: () => void
 }
 
 export default function RightPanels({
@@ -32,9 +32,9 @@ export default function RightPanels({
   onStartingBalanceChange,
   markPrice,
   channelsMeta,
-  showResistance,
-  showSupport,
-  onToggleChannelKind,
+  hiddenChannelSigs,
+  onToggleChannelHidden,
+  onClearHiddenChannels,
 }: Props) {
   return (
     <aside
@@ -59,9 +59,9 @@ export default function RightPanels({
       />
       <ChannelsList
         channels={channelsMeta}
-        showResistance={showResistance}
-        showSupport={showSupport}
-        onToggleKind={onToggleChannelKind}
+        hiddenSigs={hiddenChannelSigs}
+        onToggle={onToggleChannelHidden}
+        onClear={onClearHiddenChannels}
       />
       <BarInspector hovered={hovered} />
       <Notes timeframe={timeframe} />
@@ -416,81 +416,104 @@ function formatSignedPct(n: number): string {
 }
 
 // ---------- Channels (algo-detected) ----------
-// Two kind-level toggle chips. Click a chip → hide every rail of that side
-// (touched + derived), including markers. State lives in the parent and
-// persists across replay scrubs because it doesn't depend on per-channel
-// matching at all — it's just two booleans gating the chart render.
 function ChannelsList({
   channels,
-  showResistance,
-  showSupport,
-  onToggleKind,
+  hiddenSigs,
+  onToggle,
+  onClear,
 }: {
   channels: ChannelMeta[]
-  showResistance: boolean
-  showSupport: boolean
-  onToggleKind: (kind: 'resistance' | 'support') => void
+  hiddenSigs: ReadonlySet<string>
+  onToggle: (sig: string) => void
+  onClear: () => void
 }) {
-  const resCount = channels.reduce((n, m) => (m.channel.kind === 'resistance' ? n + 1 : n), 0)
-  const supCount = channels.length - resCount
-  const visible = (showResistance ? resCount : 0) + (showSupport ? supCount : 0)
-  const extra = channels.length > 0 ? `${visible}/${channels.length}` : undefined
+  const hiddenCount = channels.reduce((n, m) => (hiddenSigs.has(m.sig) ? n + 1 : n), 0)
+  const extra =
+    channels.length === 0
+      ? undefined
+      : hiddenCount > 0
+      ? `${channels.length} · ${hiddenCount} hidden`
+      : `${channels.length}`
 
   return (
     <Panel label="Channels" extra={extra}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <KindChip
-          label="Resistance"
-          enabled={showResistance}
-          count={resCount}
-          onClick={() => onToggleKind('resistance')}
-        />
-        <KindChip
-          label="Support"
-          enabled={showSupport}
-          count={supCount}
-          onClick={() => onToggleKind('support')}
-        />
-      </div>
+      {channels.length === 0 ? (
+        <Placeholder text="— none detected" />
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {channels.map((m) => {
+            const hidden = hiddenSigs.has(m.sig)
+            return (
+              <ChannelRow
+                key={m.sig}
+                meta={m}
+                hidden={hidden}
+                onClick={() => onToggle(m.sig)}
+              />
+            )
+          })}
+          {hiddenCount > 0 && (
+            <button
+              onClick={onClear}
+              style={{
+                appearance: 'none',
+                background: 'transparent',
+                border: 'none',
+                color: theme.textMuted,
+                fontFamily: fonts.mono,
+                fontSize: 10,
+                letterSpacing: 0.5,
+                padding: '6px 0 2px',
+                textAlign: 'left',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = theme.text }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = theme.textMuted }}
+            >
+              show all
+            </button>
+          )}
+        </div>
+      )}
     </Panel>
   )
 }
 
-function KindChip({
-  label,
-  enabled,
-  count,
+function ChannelRow({
+  meta,
+  hidden,
   onClick,
 }: {
-  label: string
-  enabled: boolean
-  count: number
+  meta: ChannelMeta
+  hidden: boolean
   onClick: () => void
 }) {
+  const { label, channel } = meta
   return (
     <button
       onClick={onClick}
-      title={enabled ? `Hide all ${label.toLowerCase()} rails` : `Show all ${label.toLowerCase()} rails`}
+      title={hidden ? `Show ${label}` : `Hide ${label}`}
       style={{
         appearance: 'none',
         background: 'transparent',
         border: 'none',
         display: 'flex',
         alignItems: 'center',
-        gap: 10,
-        padding: '6px 8px',
+        gap: 8,
+        padding: '5px 0',
         cursor: 'pointer',
         textAlign: 'left',
+        opacity: hidden ? 0.45 : 1,
+        transition: 'opacity 120ms, background 120ms',
         borderRadius: 4,
-        transition: 'background 120ms',
       }}
       onMouseEnter={(e) => { e.currentTarget.style.background = theme.surface }}
       onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
     >
       <span
         style={{
-          width: 10, height: 10, borderRadius: '50%',
-          background: enabled ? theme.accent : 'transparent',
+          width: 8, height: 8, borderRadius: '50%',
+          background: hidden ? 'transparent' : theme.accent,
           border: `1.5px solid ${theme.accent}`,
           boxSizing: 'border-box',
           flexShrink: 0,
@@ -498,26 +521,36 @@ function KindChip({
       />
       <span
         style={{
-          flex: 1,
           fontFamily: fonts.mono,
-          fontSize: 12,
-          color: enabled ? theme.text : theme.textMuted,
+          fontSize: 11,
+          color: theme.accent,
           letterSpacing: 0.4,
+          minWidth: 26,
+          fontVariantNumeric: 'tabular-nums',
         }}
       >
         {label}
       </span>
       <span
         style={{
+          flex: 1,
+          fontSize: 11,
+          color: theme.textMuted,
           fontFamily: fonts.mono,
-          fontSize: 10,
-          color: enabled && count > 0 ? theme.textInactive : 'transparent',
-          fontVariantNumeric: 'tabular-nums',
-          minWidth: 16,
-          textAlign: 'right',
+          letterSpacing: 0.3,
         }}
       >
-        {count}
+        {channel.kind}
+      </span>
+      <span
+        style={{
+          fontSize: 10,
+          color: theme.textInactive,
+          fontFamily: fonts.mono,
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        {channel.touches} touches
       </span>
     </button>
   )
