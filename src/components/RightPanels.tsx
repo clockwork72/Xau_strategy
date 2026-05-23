@@ -5,6 +5,10 @@ import type { StrategyStats } from '../engine/portfolio'
 import type { ChannelMeta } from '../engine/trendlines'
 import { DISPLAY_TZ_LABEL, formatCrosshair } from '../util/time'
 
+export interface ChannelView extends ChannelMeta {
+  hidden: boolean
+}
+
 interface Props {
   timeframe: Timeframe
   hovered: Candle | null
@@ -15,9 +19,8 @@ interface Props {
   startingBalance: number
   onStartingBalanceChange: (n: number) => void
   markPrice: number | null
-  channelsMeta: ChannelMeta[]
-  hiddenChannelSigs: ReadonlySet<string>
-  onToggleChannelHidden: (sig: string) => void
+  channelsView: ChannelView[]
+  onToggleChannelHidden: (meta: ChannelMeta) => void
   onClearHiddenChannels: () => void
 }
 
@@ -31,8 +34,7 @@ export default function RightPanels({
   startingBalance,
   onStartingBalanceChange,
   markPrice,
-  channelsMeta,
-  hiddenChannelSigs,
+  channelsView,
   onToggleChannelHidden,
   onClearHiddenChannels,
 }: Props) {
@@ -58,8 +60,7 @@ export default function RightPanels({
         markPrice={markPrice}
       />
       <ChannelsList
-        channels={channelsMeta}
-        hiddenSigs={hiddenChannelSigs}
+        channels={channelsView}
         onToggle={onToggleChannelHidden}
         onClear={onClearHiddenChannels}
       />
@@ -418,16 +419,14 @@ function formatSignedPct(n: number): string {
 // ---------- Channels (algo-detected) ----------
 function ChannelsList({
   channels,
-  hiddenSigs,
   onToggle,
   onClear,
 }: {
-  channels: ChannelMeta[]
-  hiddenSigs: ReadonlySet<string>
-  onToggle: (sig: string) => void
+  channels: ChannelView[]
+  onToggle: (meta: ChannelMeta) => void
   onClear: () => void
 }) {
-  const hiddenCount = channels.reduce((n, m) => (hiddenSigs.has(m.sig) ? n + 1 : n), 0)
+  const hiddenCount = channels.reduce((n, m) => (m.hidden ? n + 1 : n), 0)
   const extra =
     channels.length === 0
       ? undefined
@@ -441,17 +440,14 @@ function ChannelsList({
         <Placeholder text="— none detected" />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column' }}>
-          {channels.map((m) => {
-            const hidden = hiddenSigs.has(m.sig)
-            return (
-              <ChannelRow
-                key={m.sig}
-                meta={m}
-                hidden={hidden}
-                onClick={() => onToggle(m.sig)}
-              />
-            )
-          })}
+          {channels.map((m) => (
+            <ChannelRow
+              key={m.sig}
+              meta={m}
+              hidden={m.hidden}
+              onClick={() => onToggle(m)}
+            />
+          ))}
           {hiddenCount > 0 && (
             <button
               onClick={onClear}
