@@ -785,34 +785,49 @@ export default function TradingResearchSandbox() {
 
     for (let i = 0; i < visible.length; i++) {
       const ch = visible[i].channel
-      pool[i].res.setData([
-        { time: ch.startTime as Time, value: ch.upperStart },
-        { time: ch.endTime as Time, value: ch.upperEnd },
-      ])
-      pool[i].sup.setData([
-        { time: ch.startTime as Time, value: ch.lowerStart },
-        { time: ch.endTime as Time, value: ch.lowerEnd },
-      ])
       const isRes = ch.kind === 'resistance'
       const label = visible[i].label
-      pool[i].res.setMarkers(isRes ? [{
-        time: ch.startTime as Time,
-        position: 'aboveBar',
-        color: colors.accent,
-        shape: 'circle',
-        text: label,
-      }] : [])
-      pool[i].sup.setMarkers(!isRes ? [{
-        time: ch.startTime as Time,
-        position: 'belowBar',
-        color: colors.accent,
-        shape: 'circle',
-        text: label,
-      }] : [])
+      // Per-rail visibility: the toggle hides every rail of that side,
+      // including the derived parallel rail on the other-kind channel. So
+      // "Resistance off" → no upper lines anywhere; "Support off" → no
+      // lower lines anywhere.
+      if (showResistance) {
+        pool[i].res.setData([
+          { time: ch.startTime as Time, value: ch.upperStart },
+          { time: ch.endTime as Time, value: ch.upperEnd },
+        ])
+        pool[i].res.setMarkers(isRes ? [{
+          time: ch.startTime as Time,
+          position: 'aboveBar',
+          color: colors.accent,
+          shape: 'circle',
+          text: label,
+        }] : [])
+      } else {
+        pool[i].res.setData([])
+        pool[i].res.setMarkers([])
+      }
+
+      if (showSupport) {
+        pool[i].sup.setData([
+          { time: ch.startTime as Time, value: ch.lowerStart },
+          { time: ch.endTime as Time, value: ch.lowerEnd },
+        ])
+        pool[i].sup.setMarkers(!isRes ? [{
+          time: ch.startTime as Time,
+          position: 'belowBar',
+          color: colors.accent,
+          shape: 'circle',
+          text: label,
+        }] : [])
+      } else {
+        pool[i].sup.setData([])
+        pool[i].sup.setMarkers([])
+      }
     }
 
     for (let i = visible.length; i < pool.length; i++) clearPoolSlot(i)
-  }, [channelsMeta, hiddenChannelSigs, chartsReady, colors])
+  }, [channelsMeta, hiddenChannelSigs, chartsReady, colors, showResistance, showSupport])
 
   // Mirror tool state into refs for the chart click handler.
   // Switching away from trendline mid-draw clears the pending anchor.
