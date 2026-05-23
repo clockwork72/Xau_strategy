@@ -122,7 +122,11 @@ export function withChannelMeta(channels: ReadonlyArray<Channel>): ChannelMeta[]
 }
 
 export const TOUCH_PCT = 0.0006 // 0.06% of mid-window price ≈ $2.70 on $4500 gold
-const MIN_TOUCHES = 4 // rejects weak 3-touch fits that are likely coincidence
+// 3 touches commits a channel as soon as a third swing-low pivot confirms — so
+// developing channels appear during replay instead of only retroactively after
+// the 4th pivot. The density filter below still rejects sparse 3-touch fits
+// over wide spans (max span = 3/0.4 = 7.5h), so 3-touch acceptance stays tight.
+const MIN_TOUCHES = 3
 // Reject channels with too few touches per unit time — a 7-touch channel over
 // 19 hours is sparse-stale and clutters the chart on wide windows.
 const MIN_TOUCHES_PER_HOUR = 0.4
