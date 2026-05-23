@@ -83,7 +83,11 @@ function createWindow() {
   })
 
   mainWindow.webContents.on('console-message', (_e, _level, message) => {
-    if (message.startsWith('[draw]') || message.startsWith('[replay]')) {
+    if (
+      message.startsWith('[draw]') ||
+      message.startsWith('[replay]') ||
+      message.startsWith('[channels]')
+    ) {
       appendLog(`[${new Date().toISOString()}] ${message}`)
     }
   })

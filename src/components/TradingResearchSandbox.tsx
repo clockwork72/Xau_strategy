@@ -20,7 +20,14 @@ import { computeEma } from '../engine/indicators'
 import { runPriceActionBeta } from '../engine/priceActionBeta'
 import { computeStats } from '../engine/portfolio'
 import { findSwingHighs, findSwingLows, type SwingPoint } from '../engine/swings'
-import { extendChannelToTime, pickChannels, withChannelMeta, type ChannelMeta } from '../engine/trendlines'
+import {
+  channelSignature,
+  extendChannelToTime,
+  findChannelBreak,
+  pickChannels,
+  TOUCH_PCT,
+  type ChannelMeta,
+} from '../engine/trendlines'
 import type { SessionToggles } from '../engine/sessions'
 import {
   HORIZONTAL_EXTEND_SEC,
@@ -74,12 +81,14 @@ export default function TradingResearchSandbox() {
   }>>([])
   // Per-line render handles keyed by DrawnLine.id. Trendlines render via a
   // LineSeries; horizontals render via a priceLine on the candle series.
+  // `chart` remembers which chart the handle lives on so cleanup picks the
+  // right remove* target without needing to look the line up again.
   type DrawHandle =
-    | { kind: 'line'; api: ISeriesApi<'Line'> }
-    | { kind: 'priceLine'; api: IPriceLine }
+    | { kind: 'line'; api: ISeriesApi<'Line'>; chart: 'price' | 'cvd' }
+    | { kind: 'priceLine'; api: IPriceLine; chart: 'price' | 'cvd' }
   const drawnRenderMapRef = useRef<Map<string, DrawHandle>>(new Map())
   // Working anchor (waiting for the second click on a trendline draw).
-  const drawWorkingRef = useRef<{ time: number; price: number } | null>(null)
+  const drawWorkingRef = useRef<{ time: number; price: number; chart: 'price' | 'cvd' } | null>(null)
   // Mirrors so the chart click handler sees the latest values without
   // re-subscribing on every toggle.
   const activeToolRef = useRef<DrawTool>('cursor')
@@ -87,6 +96,23 @@ export default function TradingResearchSandbox() {
   const drawnLinesRef = useRef<DrawnLine[]>([])
   const selectedLineIdRef = useRef<string | null>(null)
   const swingsRef = useRef<{ highs: SwingPoint[]; lows: SwingPoint[] }>({ highs: [], lows: [] })
+  // Stateful channel tracking. Identity = (kind, startTime). When the detector
+  // re-emits the "same" channel with refined pivots, we UPDATE the live entry
+  // in place (keeping its label). Transients (live entries no longer detected)
+  // are silently dropped — not frozen. Channels freeze only when their CURRENT
+  // refined form has a confirmed break, so the replay end-state matches
+  // single-shot detection on the full range.
+  type TrackedChannel = { meta: ChannelMeta; status: 'live' | 'frozen' }
+  const trackedChannelsRef = useRef<Map<string, TrackedChannel>>(new Map())
+  // (key → label/kind) snapshot from the prior render, for log diffing.
+  const prevTrackedInfoRef = useRef<Map<string, { label: string; kind: 'resistance' | 'support' }>>(new Map())
+  // Persistent label counters: don't reuse numbers across the session even when
+  // channels drop/restore. Reset on TF / dataset / range change.
+  const labelCountersRef = useRef<{ R: number; S: number }>({ R: 0, S: 0 })
+  // Sentinels for detecting TF/range change inside the channelsMeta memo.
+  // Initial null/undefined means "not yet seen" — skip reset on first mount.
+  const prevActiveRef = useRef<typeof active | null>(null)
+  const prevAppliedRangeRef = useRef<typeof appliedRange | undefined>(undefined)
 
   // ---------- incremental-render bookkeeping ----------
   // Track last-rendered length + end time per series so we can call
@@ -323,19 +349,22 @@ export default function TradingResearchSandbox() {
     priceChart.subscribeCrosshairMove(syncFromPrice)
     cvdChart.subscribeCrosshairMove(syncFromCvd)
 
-    // ----- draw mode: routes by active tool. -----
-    // Cursor   → hit-test drawn lines, set selection.
-    // Trendline → 2 clicks (with snap), commit a DrawnLine.
-    // Horizontal → 1 click (with price snap), commit a horizontal extending right.
-    const onPriceClick = (param: MouseEventParams) => {
+    // ----- draw mode: routes by active tool. Same handler shape on price
+    // and CVD; only price gets snap-to-swing (CVD has no price-domain pivots).
+    // Every log line is tagged [draw][price|cvd] so you can grep by chart.
+    const makeClickHandler = (
+      chartId: 'price' | 'cvd',
+      chart: IChartApi,
+      series: ISeriesApi<'Candlestick'>,
+      withSnap: boolean,
+    ) => (param: MouseEventParams) => {
       const tool = activeToolRef.current
-      const series = candleSeriesRef.current
-      if (!series || !param.point) return
+      if (!param.point) return
       let time: number | null = null
       if (param.time !== undefined) {
         time = param.time as number
       } else {
-        const t = priceChart.timeScale().coordinateToTime(param.point.x)
+        const t = chart.timeScale().coordinateToTime(param.point.x)
         if (typeof t === 'number') time = t
       }
       if (time === null) return
@@ -347,8 +376,10 @@ export default function TradingResearchSandbox() {
         const py = param.point.y
         const lines = drawnLinesRef.current
         for (let i = lines.length - 1; i >= 0; i--) {
-          if (hitTestLine(px, py, lines[i], priceChart, series)) {
-            setSelectedLineId(lines[i].id)
+          const ln = lines[i]
+          if (ln.chart !== chartId) continue
+          if (hitTestLine(px, py, ln, chart, series)) {
+            setSelectedLineId(ln.id)
             return
           }
         }
@@ -356,12 +387,12 @@ export default function TradingResearchSandbox() {
         return
       }
 
-      const snapped = snapEnabledRef.current
+      const snapped = withSnap && snapEnabledRef.current
         ? snapToNearestPivot(
             time, rawPrice,
             swingsRef.current.highs, swingsRef.current.lows,
             visibleCandlesRef.current,
-            priceChart, series,
+            chart, series,
           )
         : { time, price: rawPrice, source: null, deltaPx: null }
       const snapTag = snapped.source
@@ -372,12 +403,13 @@ export default function TradingResearchSandbox() {
         const line: DrawnLine = {
           id: nextLineId(),
           tool: 'horizontal',
+          chart: chartId,
           t1: snapped.time, p1: snapped.price,
           t2: snapped.time + HORIZONTAL_EXTEND_SEC, p2: snapped.price,
         }
         // eslint-disable-next-line no-console
         console.log(
-          `[draw] line tool=horizontal p=${snapped.price.toFixed(3)} t=${formatCrosshair(snapped.time)}${snapTag}`,
+          `[draw][${chartId}] line tool=horizontal p=${snapped.price.toFixed(3)} t=${formatCrosshair(snapped.time)}${snapTag}`,
         )
         setDrawnLines((lines) => [...lines, line])
         return
@@ -385,10 +417,20 @@ export default function TradingResearchSandbox() {
 
       // trendline: two-click flow
       if (drawWorkingRef.current === null) {
-        drawWorkingRef.current = { time: snapped.time, price: snapped.price }
+        drawWorkingRef.current = { time: snapped.time, price: snapped.price, chart: chartId }
         // eslint-disable-next-line no-console
         console.log(
-          `[draw] anchor1 t=${formatCrosshair(snapped.time)} p=${snapped.price.toFixed(3)}${snapTag}`,
+          `[draw][${chartId}] anchor1 t=${formatCrosshair(snapped.time)} p=${snapped.price.toFixed(3)}${snapTag}`,
+        )
+        return
+      }
+      // If second click lands on a different chart than the first anchor,
+      // discard the in-progress trendline — cross-chart lines aren't a thing.
+      if (drawWorkingRef.current.chart !== chartId) {
+        drawWorkingRef.current = { time: snapped.time, price: snapped.price, chart: chartId }
+        // eslint-disable-next-line no-console
+        console.log(
+          `[draw][${chartId}] anchor1 t=${formatCrosshair(snapped.time)} p=${snapped.price.toFixed(3)}${snapTag} (cross-chart restart)`,
         )
         return
       }
@@ -400,14 +442,22 @@ export default function TradingResearchSandbox() {
       const slopeH = dt !== 0 ? ((dp / dt) * 3600).toFixed(3) : 'inf'
       // eslint-disable-next-line no-console
       console.log(
-        `[draw] line tool=trendline a=${formatCrosshair(a.time)}@${a.price.toFixed(3)} b=${formatCrosshair(b.time)}@${b.price.toFixed(3)} dt=${dt}s dp=${dp.toFixed(3)} slope/h=${slopeH}${snapTag}`,
+        `[draw][${chartId}] line tool=trendline a=${formatCrosshair(a.time)}@${a.price.toFixed(3)} b=${formatCrosshair(b.time)}@${b.price.toFixed(3)} dt=${dt}s dp=${dp.toFixed(3)} slope/h=${slopeH}${snapTag}`,
       )
       setDrawnLines((lines) => [
         ...lines,
-        { id: nextLineId(), tool: 'trendline', t1: a.time, p1: a.price, t2: b.time, p2: b.price },
+        {
+          id: nextLineId(),
+          tool: 'trendline',
+          chart: chartId,
+          t1: a.time, p1: a.price, t2: b.time, p2: b.price,
+        },
       ])
     }
+    const onPriceClick = makeClickHandler('price', priceChart, candle, true)
+    const onCvdClick = makeClickHandler('cvd', cvdChart, cvd, false)
     priceChart.subscribeClick(onPriceClick)
+    cvdChart.subscribeClick(onCvdClick)
 
     const ro = new ResizeObserver(() => {
       if (priceContainerRef.current) {
@@ -433,6 +483,7 @@ export default function TradingResearchSandbox() {
       priceChart.unsubscribeCrosshairMove(syncFromPrice)
       cvdChart.unsubscribeCrosshairMove(syncFromCvd)
       priceChart.unsubscribeClick(onPriceClick)
+      cvdChart.unsubscribeClick(onCvdClick)
       priceChart.remove()
       cvdChart.remove()
       priceChartRef.current = null
@@ -549,8 +600,28 @@ export default function TradingResearchSandbox() {
   // Labels (R1/R2/S1/S2…) are assigned by full enumeration order, so a
   // hidden channel keeps its label and the visible chart can have gaps.
   const channelsMeta = useMemo<ChannelMeta[]>(() => {
+    // Detect TF / dataset / range change in-memo: the prior separate reset
+    // useEffect ran after render and wiped tracked just before the log effect
+    // could see populated entries (causing missing detect logs). Doing the
+    // reset here keeps the populate and log-diff in the same commit.
+    const isFirstSeen = prevActiveRef.current === null && prevAppliedRangeRef.current === undefined
+    const activeChanged = !isFirstSeen && prevActiveRef.current !== active
+    const rangeChanged = !isFirstSeen && prevAppliedRangeRef.current !== appliedRange
+    if (activeChanged || rangeChanged) {
+      const n = trackedChannelsRef.current.size
+      if (n > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[channels] reset (cleared ${n} tracked)`)
+      }
+      trackedChannelsRef.current.clear()
+      prevTrackedInfoRef.current = new Map()
+      labelCountersRef.current = { R: 0, S: 0 }
+    }
+    prevActiveRef.current = active
+    prevAppliedRangeRef.current = appliedRange
+
     if (!trendlineEnabled || visibleCandles.length === 0) return []
-    const channels = [
+    const rawChannels = [
       ...(showResistance ? pickChannels(drawSwings.highs, visibleCandles, 'resistance') : []),
       ...(showSupport ? pickChannels(drawSwings.lows, visibleCandles, 'support') : []),
     ]
@@ -558,14 +629,124 @@ export default function TradingResearchSandbox() {
     // Re-enable by sorting all candidates by (endTime - startTime) desc and
     // dropping any that overlaps an already-accepted one in time.
     // ---- /DISABLED ----
-    // Extend rails forward to the current replay edge, post-sig so the
-    // per-channel hide rows keep their anchor-based keys.
     const lastTime = visibleCandles[visibleCandles.length - 1].time as number
-    return withChannelMeta(channels).map((m) => ({
-      ...m,
-      channel: extendChannelToTime(m.channel, lastTime),
-    }))
+    const midPrice = visibleCandles[Math.floor(visibleCandles.length / 2)].close
+    const eps = midPrice * TOUCH_PCT
+    const prev = trackedChannelsRef.current
+    const next = new Map<string, TrackedChannel>()
+
+    // Index prev by identity for label inheritance. Covers BOTH live and
+    // frozen entries, in-view and out-of-view. Prefer 'live' on collision
+    // (most recent state representation of that identity).
+    const prevByIdentity = new Map<string, TrackedChannel>()
+    for (const [, t] of prev) {
+      const id = `${t.meta.channel.kind}|${t.meta.channel.startTime}`
+      const existing = prevByIdentity.get(id)
+      if (!existing || (existing.status === 'frozen' && t.status === 'live')) {
+        prevByIdentity.set(id, t)
+      }
+    }
+
+    // Process raw channels — one entry per identity. The same identity in
+    // prev (live OR frozen) inherits its label; otherwise a fresh number.
+    const detectedIdentities = new Set<string>()
+    for (const c of rawChannels) {
+      const identity = `${c.kind}|${c.startTime}`
+      if (detectedIdentities.has(identity)) continue
+      detectedIdentities.add(identity)
+
+      const breakT = findChannelBreak(c, visibleCandles, eps)
+      const extended = extendChannelToTime(c, breakT ?? lastTime)
+      const sig = channelSignature(c)
+
+      const prevSame = prevByIdentity.get(identity)
+      const label = prevSame
+        ? prevSame.meta.label
+        : c.kind === 'resistance'
+          ? `R${++labelCountersRef.current.R}`
+          : `S${++labelCountersRef.current.S}`
+
+      const meta: ChannelMeta = { channel: extended, sig, label }
+      if (breakT !== null) {
+        next.set(`frozen|${identity}|${breakT}`, { meta, status: 'frozen' })
+      } else {
+        next.set(`live|${identity}`, { meta, status: 'live' })
+      }
+    }
+
+    // Carry over prev frozens whose identity wasn't re-detected AND whose
+    // break is still in view. Re-detected ones were replaced above; out-of-
+    // view ones are silently dropped (backward scrub).
+    for (const [key, t] of prev) {
+      if (t.status !== 'frozen') continue
+      const identity = `${t.meta.channel.kind}|${t.meta.channel.startTime}`
+      if (detectedIdentities.has(identity)) continue
+      if ((t.meta.channel.endTime as number) > lastTime) continue
+      next.set(key, t)
+    }
+
+    trackedChannelsRef.current = next
+    return [...next.values()].map((t) => t.meta)
   }, [drawSwings, trendlineEnabled, visibleCandles, showResistance, showSupport])
+
+  // ---------- session.log: channel detect / freeze / drop / unfreeze ----------
+  // Diffs tracked entries by KEY (not sig) so refinements within the same
+  // identity don't spam. Lives in a useEffect so StrictMode double-invoke of
+  // memos can't double-log.
+  useEffect(() => {
+    const current = trackedChannelsRef.current
+    const prevInfo = prevTrackedInfoRef.current
+
+    // Map identity → new frozen key, so a live-key removal can tell whether it
+    // was a freeze (transition) or an actual drop (transient gone).
+    const newFrozenByIdentity = new Map<string, string>()
+    for (const [key, t] of current) {
+      if (t.status !== 'frozen' || prevInfo.has(key)) continue
+      newFrozenByIdentity.set(`${t.meta.channel.kind}|${t.meta.channel.startTime}`, key)
+    }
+
+    for (const [key, t] of current) {
+      if (prevInfo.has(key)) continue
+      const ch = t.meta.channel
+      if (t.status === 'frozen') {
+        // eslint-disable-next-line no-console
+        console.log(
+          `[channels] freeze label=${t.meta.label} kind=${ch.kind} break=${formatCrosshair(ch.endTime)} sig=${t.meta.sig}`,
+        )
+      } else {
+        const dt = ch.endTime - ch.startTime
+        const slopeH =
+          dt > 0 ? (((ch.upperEnd - ch.upperStart) / dt) * 3600).toFixed(3) : 'inf'
+        const aY = ch.kind === 'resistance' ? ch.upperStart : ch.lowerStart
+        const bY = ch.kind === 'resistance' ? ch.upperEnd : ch.lowerEnd
+        // eslint-disable-next-line no-console
+        console.log(
+          `[channels] detect label=${t.meta.label} kind=${ch.kind} touches=${ch.touches} anchors=${formatCrosshair(ch.startTime)}@${aY.toFixed(3)}/${formatCrosshair(ch.endTime)}@${bY.toFixed(3)} slope/h=${slopeH} sig=${t.meta.sig}`,
+        )
+      }
+    }
+
+    for (const [key, info] of prevInfo) {
+      if (current.has(key)) continue
+      if (key.startsWith('live|')) {
+        const parts = key.split('|')
+        const identity = `${parts[1]}|${parts[2]}`
+        // Live → frozen transition already logged above as "freeze".
+        if (newFrozenByIdentity.has(identity)) continue
+        // eslint-disable-next-line no-console
+        console.log(`[channels] drop label=${info.label} kind=${info.kind}`)
+      } else {
+        // eslint-disable-next-line no-console
+        console.log(`[channels] unfreeze label=${info.label} kind=${info.kind}`)
+      }
+    }
+
+    const nextInfo = new Map<string, { label: string; kind: 'resistance' | 'support' }>()
+    for (const [key, t] of current) {
+      nextInfo.set(key, { label: t.meta.label, kind: t.meta.channel.kind })
+    }
+    prevTrackedInfoRef.current = nextInfo
+  }, [channelsMeta])
 
   useEffect(() => {
     const chart = priceChartRef.current
@@ -723,10 +904,12 @@ export default function TradingResearchSandbox() {
           const id = selectedLineIdRef.current
           if (!id) return
           e.preventDefault()
+          const target = drawnLinesRef.current.find((l) => l.id === id)
+          const chartTag = target ? `[${target.chart}]` : ''
           setDrawnLines((lines) => lines.filter((l) => l.id !== id))
           setSelectedLineId(null)
           // eslint-disable-next-line no-console
-          console.log(`[draw] delete id=${id}`)
+          console.log(`[draw]${chartTag} delete id=${id}`)
           return
         }
       }
@@ -736,33 +919,44 @@ export default function TradingResearchSandbox() {
   }, [])
 
   // Render user-drawn lines. Keyed by line.id, mixing LineSeries (trendlines)
-  // and priceLine (horizontals) so different shapes coexist cleanly.
+  // and priceLine (horizontals) so different shapes coexist cleanly. Each
+  // handle remembers its chart so cleanup removes from the right one.
   // The selected line gets a thicker stroke; others render at lineWidth 2.
   useEffect(() => {
-    const chart = priceChartRef.current
+    const priceChart = priceChartRef.current
+    const cvdChart = cvdChartRef.current
     const candleSeries = candleSeriesRef.current
-    if (!chart || !candleSeries) return
+    const cvdSeries = cvdSeriesRef.current
+    if (!priceChart || !cvdChart || !candleSeries || !cvdSeries) return
+    const chartFor = (id: 'price' | 'cvd') => (id === 'price' ? priceChart : cvdChart)
+    const seriesFor = (id: 'price' | 'cvd') => (id === 'price' ? candleSeries : cvdSeries)
+
     const map = drawnRenderMapRef.current
     const currentIds = new Set(drawnLines.map((l) => l.id))
 
     for (const [id, handle] of map) {
       if (currentIds.has(id)) continue
-      if (handle.kind === 'line') chart.removeSeries(handle.api)
-      else candleSeries.removePriceLine(handle.api)
+      if (handle.kind === 'line') chartFor(handle.chart).removeSeries(handle.api)
+      else seriesFor(handle.chart).removePriceLine(handle.api)
       map.delete(id)
     }
 
     for (const line of drawnLines) {
       const isSelected = line.id === selectedLineId
       const width = isSelected ? 3 : 2
+      const chart = chartFor(line.chart)
+      const candle = seriesFor(line.chart)
 
       if (line.tool === 'horizontal') {
         const existing = map.get(line.id)
-        if (existing && existing.kind === 'priceLine') {
+        if (existing && existing.kind === 'priceLine' && existing.chart === line.chart) {
           existing.api.applyOptions({ price: line.p1, color: colors.warn, lineWidth: width as 1 | 2 | 3 | 4 })
         } else {
-          if (existing && existing.kind === 'line') chart.removeSeries(existing.api)
-          const pl = candleSeries.createPriceLine({
+          if (existing) {
+            if (existing.kind === 'line') chartFor(existing.chart).removeSeries(existing.api)
+            else seriesFor(existing.chart).removePriceLine(existing.api)
+          }
+          const pl = candle.createPriceLine({
             price: line.p1,
             color: colors.warn,
             lineWidth: width as 1 | 2 | 3 | 4,
@@ -770,15 +964,16 @@ export default function TradingResearchSandbox() {
             axisLabelVisible: false,
             title: '',
           })
-          map.set(line.id, { kind: 'priceLine', api: pl })
+          map.set(line.id, { kind: 'priceLine', api: pl, chart: line.chart })
         }
         continue
       }
 
       // trendline
       let handle = map.get(line.id)
-      if (handle && handle.kind === 'priceLine') {
-        candleSeries.removePriceLine(handle.api)
+      if (handle && (handle.kind === 'priceLine' || handle.chart !== line.chart)) {
+        if (handle.kind === 'line') chartFor(handle.chart).removeSeries(handle.api)
+        else seriesFor(handle.chart).removePriceLine(handle.api)
         handle = undefined
         map.delete(line.id)
       }
@@ -794,7 +989,7 @@ export default function TradingResearchSandbox() {
           lastValueVisible: false,
           crosshairMarkerVisible: false,
         })
-        map.set(line.id, { kind: 'line', api: series })
+        map.set(line.id, { kind: 'line', api: series, chart: line.chart })
       }
       const [first, second] =
         line.t1 <= line.t2

@@ -32,6 +32,65 @@ export function channelSignature(c: Pick<Channel, 'kind' | 'startTime' | 'endTim
   return `${c.kind}|${c.startTime}|${c.endTime}`
 }
 
+/** Confirmation window for a break: how many consecutive closes outside ± eps
+ * are needed before we accept the break (and truncate the channel). Filters
+ * single-bar wobbles that immediately rejoin the channel. */
+export const CONFIRM_BREAK_BARS = 2
+
+/**
+ * Time of the FIRST candle in the earliest run of `CONFIRM_BREAK_BARS`
+ * consecutive closes outside either rail by more than `eps`, scanning bars
+ * strictly after `c.endTime`. Returns null if no such confirmed run exists.
+ * The channel is truncated to this first-break time (not the confirmation bar).
+ */
+export function findChannelBreak(
+  c: Channel,
+  candles: ReadonlyArray<Candle>,
+  eps: number,
+): number | null {
+  const dt = c.endTime - c.startTime
+  if (dt <= 0) return null
+  const slopeUpper = (c.upperEnd - c.upperStart) / dt
+  const slopeLower = (c.lowerEnd - c.lowerStart) / dt
+  let runStart: number | null = null
+  let streak = 0
+  for (let i = 0; i < candles.length; i++) {
+    const t = candles[i].time as number
+    if (t <= c.endTime) continue
+    const upperY = c.upperEnd + slopeUpper * (t - c.endTime)
+    const lowerY = c.lowerEnd + slopeLower * (t - c.endTime)
+    const close = candles[i].close
+    if (close > upperY + eps || close < lowerY - eps) {
+      if (runStart === null) runStart = t
+      streak++
+      if (streak >= CONFIRM_BREAK_BARS) return runStart
+    } else {
+      runStart = null
+      streak = 0
+    }
+  }
+  return null
+}
+
+/**
+ * Quantized geometric key for a channel. Two channels that resolve to the
+ * same fingerprint are "the same line" detected with different pivot anchors —
+ * use this for de-duping at the render boundary so ghost overlays from
+ * pivot drift across replay ticks collapse into one rendered channel.
+ *   slope bucket: ~0.5 $/hour
+ *   y bucket:     eps (same tolerance as touch detection)
+ */
+export function channelFingerprint(c: Channel, eps: number): string {
+  const dt = c.endTime - c.startTime
+  if (dt <= 0 || eps <= 0) return `${c.kind}|deg`
+  const slope = (c.upperEnd - c.upperStart) / dt
+  const slopeBucket = Math.round(slope * 7200) // 1 unit = 0.5 $/hour
+  const midT = (c.startTime + c.endTime) / 2
+  const midY = c.upperStart + slope * (midT - c.startTime)
+  const yBucket = Math.round(midY / eps)
+  return `${c.kind}|${slopeBucket}|${yBucket}`
+}
+
 /**
  * Extrapolate both rails forward to `t` along the channel's existing slope.
  * No-op if `t` is at-or-before the channel's current end. Call this AFTER
@@ -61,8 +120,14 @@ export function withChannelMeta(channels: ReadonlyArray<Channel>): ChannelMeta[]
   })
 }
 
-const TOUCH_PCT = 0.0006 // 0.06% of mid-window price ≈ $2.70 on $4500 gold
-const MIN_TOUCHES = 3
+export const TOUCH_PCT = 0.0006 // 0.06% of mid-window price ≈ $2.70 on $4500 gold
+const MIN_TOUCHES = 4 // rejects weak 3-touch fits that are likely coincidence
+// Reject channels with too few touches per unit time — a 7-touch channel over
+// 19 hours is sparse-stale and clutters the chart on wide windows.
+const MIN_TOUCHES_PER_HOUR = 0.4
+// Skip the top fraction of extreme bars when picking the derived parallel rail,
+// so a single-bar spike doesn't yank the rail far from the price action.
+const DERIVED_RAIL_PCT = 0.05
 
 /**
  * Touch-scored channel detection.
@@ -122,6 +187,11 @@ export function pickChannels(
     const overlaps = ranges.some(([s, e]) => !(endTime < s || startTime > e))
     if (overlaps) continue
 
+    // Density filter: sparse-stale channels (few touches over many hours) are
+    // usually coincidence on wide windows. Drop them before drawing.
+    const spanHours = (endTime - startTime) / 3600
+    if (spanHours > 0 && c.touches / spanHours < MIN_TOUCHES_PER_HOUR) continue
+
     const firstCandleIdx = swings[c.firstIdx].index
     const lastCandleIdx = swings[c.lastIdx].index
 
@@ -130,18 +200,19 @@ export function pickChannels(
     const touchedStart = c.aSwing.price + c.slope * (startTime - aT)
     const touchedEnd = c.aSwing.price + c.slope * (endTime - aT)
 
-    // Derived parallel rail: through the extreme price in the opposite
-    // direction between firstCandleIdx and lastCandleIdx.
-    let extIdx = firstCandleIdx
-    if (kind === 'resistance') {
-      for (let k = firstCandleIdx; k <= lastCandleIdx; k++) {
-        if (candles[k].low < candles[extIdx].low) extIdx = k
-      }
-    } else {
-      for (let k = firstCandleIdx; k <= lastCandleIdx; k++) {
-        if (candles[k].high > candles[extIdx].high) extIdx = k
-      }
-    }
+    // Derived parallel rail: anchor at the DERIVED_RAIL_PCT-percentile extreme
+    // (not the absolute extreme) so a single-bar spike inside a long channel
+    // doesn't yank the rail far from the price action.
+    const sliceLen = lastCandleIdx - firstCandleIdx + 1
+    const skipCount = Math.min(Math.floor(sliceLen * DERIVED_RAIL_PCT), sliceLen - 1)
+    const indices: number[] = []
+    for (let k = firstCandleIdx; k <= lastCandleIdx; k++) indices.push(k)
+    indices.sort((a, b) =>
+      kind === 'resistance'
+        ? candles[a].low - candles[b].low // ascending: lowest first
+        : candles[b].high - candles[a].high, // descending: highest first
+    )
+    const extIdx = indices[skipCount]
     const extTime = candles[extIdx].time as number
     const extPrice = kind === 'resistance' ? candles[extIdx].low : candles[extIdx].high
     const derivedStart = extPrice + c.slope * (startTime - extTime)

@@ -3,13 +3,15 @@ import type { Candle } from '../types'
 import type { SwingPoint } from './swings'
 
 export type DrawTool = 'cursor' | 'trendline' | 'horizontal'
+export type DrawnLineChart = 'price' | 'cvd'
 
 export interface DrawnLine {
   id: string
   tool: 'trendline' | 'horizontal'
-  // Both anchors stored in real UTC seconds + price units. For horizontal
-  // lines, p2 === p1 and t2 is a far-right anchor so the rendered line
-  // extends well past the visible area.
+  chart: DrawnLineChart
+  // Both anchors stored in real UTC seconds + (price OR CVD-cumulative) units
+  // depending on `chart`. For horizontal lines, p2 === p1 and t2 is a far-right
+  // anchor so the rendered line extends well past the visible area.
   t1: number
   p1: number
   t2: number
