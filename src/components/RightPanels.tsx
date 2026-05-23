@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { theme, fonts, sizes } from '../theme'
 import type { Candle, Timeframe } from '../types'
 import type { StrategyStats } from '../engine/portfolio'
-import type { ChannelMeta } from '../engine/trendlines'
 import { DISPLAY_TZ_LABEL, formatCrosshair } from '../util/time'
 
 interface Props {
@@ -15,11 +14,6 @@ interface Props {
   startingBalance: number
   onStartingBalanceChange: (n: number) => void
   markPrice: number | null
-  channelsMeta: ChannelMeta[]
-  showResistance: boolean
-  showSupport: boolean
-  onToggleChannelHidden: (meta: ChannelMeta) => void
-  onClearHiddenChannels: () => void
 }
 
 export default function RightPanels({
@@ -32,11 +26,6 @@ export default function RightPanels({
   startingBalance,
   onStartingBalanceChange,
   markPrice,
-  channelsMeta,
-  showResistance,
-  showSupport,
-  onToggleChannelHidden,
-  onClearHiddenChannels,
 }: Props) {
   return (
     <aside
@@ -58,13 +47,6 @@ export default function RightPanels({
         startingBalance={startingBalance}
         onStartingBalanceChange={onStartingBalanceChange}
         markPrice={markPrice}
-      />
-      <ChannelsList
-        channels={channelsMeta}
-        showResistance={showResistance}
-        showSupport={showSupport}
-        onToggle={onToggleChannelHidden}
-        onClear={onClearHiddenChannels}
       />
       <BarInspector hovered={hovered} />
       <Notes timeframe={timeframe} />
@@ -416,140 +398,6 @@ function formatSignedPct(n: number): string {
   if (n === 0) return '0.00%'
   const sign = n > 0 ? '+' : '−'
   return `${sign}${Math.abs(n).toFixed(2)}%`
-}
-
-// ---------- Channels (algo-detected) ----------
-function ChannelsList({
-  channels,
-  showResistance,
-  showSupport,
-  onToggle,
-  onClear,
-}: {
-  channels: ChannelMeta[]
-  showResistance: boolean
-  showSupport: boolean
-  onToggle: (meta: ChannelMeta) => void
-  onClear: () => void
-}) {
-  const anyKindOff = !showResistance || !showSupport
-  const offLabel = !showResistance && !showSupport
-    ? 'all kinds off'
-    : !showResistance
-    ? 'resistance off'
-    : !showSupport
-    ? 'support off'
-    : null
-  const extra = offLabel
-    ? channels.length > 0 ? `${channels.length} · ${offLabel}` : offLabel
-    : channels.length > 0 ? `${channels.length}` : undefined
-
-  return (
-    <Panel label="Channels" extra={extra}>
-      {channels.length === 0 ? (
-        <Placeholder text={offLabel ? '— hidden by kind toggle' : '— none detected'} />
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column' }}>
-          {channels.map((m) => (
-            <ChannelRow key={m.sig} meta={m} onClick={() => onToggle(m)} />
-          ))}
-        </div>
-      )}
-      {anyKindOff && (
-        <button
-          onClick={onClear}
-          style={{
-            appearance: 'none',
-            background: 'transparent',
-            border: 'none',
-            color: theme.textMuted,
-            fontFamily: fonts.mono,
-            fontSize: 10,
-            letterSpacing: 0.5,
-            padding: '6px 0 2px',
-            textAlign: 'left',
-            cursor: 'pointer',
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.color = theme.text }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = theme.textMuted }}
-        >
-          show all
-        </button>
-      )}
-    </Panel>
-  )
-}
-
-function ChannelRow({
-  meta,
-  onClick,
-}: {
-  meta: ChannelMeta
-  onClick: () => void
-}) {
-  const { label, channel } = meta
-  return (
-    <button
-      onClick={onClick}
-      title={`Hide all ${channel.kind} channels`}
-      style={{
-        appearance: 'none',
-        background: 'transparent',
-        border: 'none',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '5px 0',
-        cursor: 'pointer',
-        textAlign: 'left',
-        transition: 'background 120ms',
-        borderRadius: 4,
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.background = theme.surface }}
-      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
-    >
-      <span
-        style={{
-          width: 8, height: 8, borderRadius: '50%',
-          background: theme.accent,
-          flexShrink: 0,
-        }}
-      />
-      <span
-        style={{
-          fontFamily: fonts.mono,
-          fontSize: 11,
-          color: theme.accent,
-          letterSpacing: 0.4,
-          minWidth: 26,
-          fontVariantNumeric: 'tabular-nums',
-        }}
-      >
-        {label}
-      </span>
-      <span
-        style={{
-          flex: 1,
-          fontSize: 11,
-          color: theme.textMuted,
-          fontFamily: fonts.mono,
-          letterSpacing: 0.3,
-        }}
-      >
-        {channel.kind}
-      </span>
-      <span
-        style={{
-          fontSize: 10,
-          color: theme.textInactive,
-          fontFamily: fonts.mono,
-          fontVariantNumeric: 'tabular-nums',
-        }}
-      >
-        {channel.touches} touches
-      </span>
-    </button>
-  )
 }
 
 // ---------- Bar Inspector ----------

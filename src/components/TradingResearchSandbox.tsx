@@ -889,20 +889,6 @@ export default function TradingResearchSandbox() {
 
   const toggleTheme = () => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))
 
-  // Clicking a row in the Channels panel toggles the whole kind, mirroring
-  // the LeftNav Resistance / Support checkboxes. This intentionally makes the
-  // panel a coarse control: one click hides every channel of that kind for
-  // good (across replay scrubs), since per-channel sig/fingerprint hiding
-  // can't survive the algo re-detecting genuinely-different channels at
-  // other replay positions.
-  const toggleChannelHidden = (meta: ChannelMeta) => {
-    if (meta.channel.kind === 'resistance') setShowResistance((v) => !v)
-    else setShowSupport((v) => !v)
-  }
-  const clearHiddenChannels = () => {
-    setShowResistance(true)
-    setShowSupport(true)
-  }
 
   // ---------- keyboard: draw tool shortcuts ----------
   // V cursor · T trendline · H horizontal · S snap toggle
@@ -1188,11 +1174,6 @@ export default function TradingResearchSandbox() {
           startingBalance={startingBalance}
           onStartingBalanceChange={setStartingBalance}
           markPrice={markPrice}
-          channelsMeta={channelsMeta}
-          showResistance={showResistance}
-          showSupport={showSupport}
-          onToggleChannelHidden={toggleChannelHidden}
-          onClearHiddenChannels={clearHiddenChannels}
         />
       </div>
 
