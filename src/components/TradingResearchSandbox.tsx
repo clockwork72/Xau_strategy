@@ -21,14 +21,7 @@ import { computeEma } from '../engine/indicators'
 import { runPriceActionBeta } from '../engine/priceActionBeta'
 import { computeStats } from '../engine/portfolio'
 import { findSwingHighs, findSwingLows, type SwingPoint } from '../engine/swings'
-import {
-  pickChannels,
-  withChannelMeta,
-  makeFingerprint,
-  channelMatchesFingerprint,
-  type ChannelMeta,
-  type ChannelFingerprint,
-} from '../engine/trendlines'
+import { pickChannels, withChannelMeta, type ChannelMeta } from '../engine/trendlines'
 import type { SessionToggles } from '../engine/sessions'
 import {
   HORIZONTAL_EXTEND_SEC,
@@ -155,7 +148,6 @@ export default function TradingResearchSandbox() {
   const colors = palettes[themeMode]
   const [activeTool, setActiveTool] = useState<DrawTool>('cursor')
   const [snapEnabled, setSnapEnabled] = useState(true)
-  const [hiddenChannelFingerprints, setHiddenChannelFingerprints] = useState<ChannelFingerprint[]>([])
   const [drawnLines, setDrawnLines] = useState<DrawnLine[]>([])
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null)
   const [strategyEnabled, setStrategyEnabled] = useState(true)
@@ -757,17 +749,6 @@ export default function TradingResearchSandbox() {
     return withChannelMeta(channels)
   }, [drawSwings, showResistance, showSupport, visibleCandles])
 
-  // Enrich each meta with a `hidden` flag derived from the persistent
-  // fingerprint set. A re-anchored same-geometry channel still matches its
-  // fingerprint, so hides stick across replay scrubs.
-  const channelsView = useMemo(
-    () => channelsMeta.map((m) => ({
-      ...m,
-      hidden: hiddenChannelFingerprints.some((fp) => channelMatchesFingerprint(m.channel, fp)),
-    })),
-    [channelsMeta, hiddenChannelFingerprints],
-  )
-
   useEffect(() => {
     const chart = priceChartRef.current
     if (!chart) return
@@ -780,7 +761,7 @@ export default function TradingResearchSandbox() {
       pool[i].sup.setMarkers([])
     }
 
-    const visible = channelsView.filter((m) => !m.hidden)
+    const visible = channelsMeta
 
     while (pool.length < visible.length) {
       pool.push({
@@ -845,7 +826,7 @@ export default function TradingResearchSandbox() {
     }
 
     for (let i = visible.length; i < pool.length; i++) clearPoolSlot(i)
-  }, [channelsView, chartsReady, colors, showResistance, showSupport])
+  }, [channelsMeta, chartsReady, colors, showResistance, showSupport])
 
   // Mirror tool state into refs for the chart click handler.
   // Switching away from trendline mid-draw clears the pending anchor.
@@ -908,14 +889,20 @@ export default function TradingResearchSandbox() {
 
   const toggleTheme = () => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))
 
+  // Clicking a row in the Channels panel toggles the whole kind, mirroring
+  // the LeftNav Resistance / Support checkboxes. This intentionally makes the
+  // panel a coarse control: one click hides every channel of that kind for
+  // good (across replay scrubs), since per-channel sig/fingerprint hiding
+  // can't survive the algo re-detecting genuinely-different channels at
+  // other replay positions.
   const toggleChannelHidden = (meta: ChannelMeta) => {
-    setHiddenChannelFingerprints((prev) => {
-      const idx = prev.findIndex((fp) => channelMatchesFingerprint(meta.channel, fp))
-      if (idx >= 0) return prev.filter((_, i) => i !== idx)
-      return [...prev, makeFingerprint(meta.channel)]
-    })
+    if (meta.channel.kind === 'resistance') setShowResistance((v) => !v)
+    else setShowSupport((v) => !v)
   }
-  const clearHiddenChannels = () => setHiddenChannelFingerprints([])
+  const clearHiddenChannels = () => {
+    setShowResistance(true)
+    setShowSupport(true)
+  }
 
   // ---------- keyboard: draw tool shortcuts ----------
   // V cursor · T trendline · H horizontal · S snap toggle
@@ -1201,7 +1188,9 @@ export default function TradingResearchSandbox() {
           startingBalance={startingBalance}
           onStartingBalanceChange={setStartingBalance}
           markPrice={markPrice}
-          channelsView={channelsView}
+          channelsMeta={channelsMeta}
+          showResistance={showResistance}
+          showSupport={showSupport}
           onToggleChannelHidden={toggleChannelHidden}
           onClearHiddenChannels={clearHiddenChannels}
         />

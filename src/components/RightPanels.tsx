@@ -5,10 +5,6 @@ import type { StrategyStats } from '../engine/portfolio'
 import type { ChannelMeta } from '../engine/trendlines'
 import { DISPLAY_TZ_LABEL, formatCrosshair } from '../util/time'
 
-export interface ChannelView extends ChannelMeta {
-  hidden: boolean
-}
-
 interface Props {
   timeframe: Timeframe
   hovered: Candle | null
@@ -19,7 +15,9 @@ interface Props {
   startingBalance: number
   onStartingBalanceChange: (n: number) => void
   markPrice: number | null
-  channelsView: ChannelView[]
+  channelsMeta: ChannelMeta[]
+  showResistance: boolean
+  showSupport: boolean
   onToggleChannelHidden: (meta: ChannelMeta) => void
   onClearHiddenChannels: () => void
 }
@@ -34,7 +32,9 @@ export default function RightPanels({
   startingBalance,
   onStartingBalanceChange,
   markPrice,
-  channelsView,
+  channelsMeta,
+  showResistance,
+  showSupport,
   onToggleChannelHidden,
   onClearHiddenChannels,
 }: Props) {
@@ -60,7 +60,9 @@ export default function RightPanels({
         markPrice={markPrice}
       />
       <ChannelsList
-        channels={channelsView}
+        channels={channelsMeta}
+        showResistance={showResistance}
+        showSupport={showSupport}
         onToggle={onToggleChannelHidden}
         onClear={onClearHiddenChannels}
       />
@@ -419,57 +421,60 @@ function formatSignedPct(n: number): string {
 // ---------- Channels (algo-detected) ----------
 function ChannelsList({
   channels,
+  showResistance,
+  showSupport,
   onToggle,
   onClear,
 }: {
-  channels: ChannelView[]
+  channels: ChannelMeta[]
+  showResistance: boolean
+  showSupport: boolean
   onToggle: (meta: ChannelMeta) => void
   onClear: () => void
 }) {
-  const hiddenCount = channels.reduce((n, m) => (m.hidden ? n + 1 : n), 0)
-  const extra =
-    channels.length === 0
-      ? undefined
-      : hiddenCount > 0
-      ? `${channels.length} · ${hiddenCount} hidden`
-      : `${channels.length}`
+  const anyKindOff = !showResistance || !showSupport
+  const offLabel = !showResistance && !showSupport
+    ? 'all kinds off'
+    : !showResistance
+    ? 'resistance off'
+    : !showSupport
+    ? 'support off'
+    : null
+  const extra = offLabel
+    ? channels.length > 0 ? `${channels.length} · ${offLabel}` : offLabel
+    : channels.length > 0 ? `${channels.length}` : undefined
 
   return (
     <Panel label="Channels" extra={extra}>
       {channels.length === 0 ? (
-        <Placeholder text="— none detected" />
+        <Placeholder text={offLabel ? '— hidden by kind toggle' : '— none detected'} />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           {channels.map((m) => (
-            <ChannelRow
-              key={m.sig}
-              meta={m}
-              hidden={m.hidden}
-              onClick={() => onToggle(m)}
-            />
+            <ChannelRow key={m.sig} meta={m} onClick={() => onToggle(m)} />
           ))}
-          {hiddenCount > 0 && (
-            <button
-              onClick={onClear}
-              style={{
-                appearance: 'none',
-                background: 'transparent',
-                border: 'none',
-                color: theme.textMuted,
-                fontFamily: fonts.mono,
-                fontSize: 10,
-                letterSpacing: 0.5,
-                padding: '6px 0 2px',
-                textAlign: 'left',
-                cursor: 'pointer',
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.color = theme.text }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = theme.textMuted }}
-            >
-              show all
-            </button>
-          )}
         </div>
+      )}
+      {anyKindOff && (
+        <button
+          onClick={onClear}
+          style={{
+            appearance: 'none',
+            background: 'transparent',
+            border: 'none',
+            color: theme.textMuted,
+            fontFamily: fonts.mono,
+            fontSize: 10,
+            letterSpacing: 0.5,
+            padding: '6px 0 2px',
+            textAlign: 'left',
+            cursor: 'pointer',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = theme.text }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = theme.textMuted }}
+        >
+          show all
+        </button>
       )}
     </Panel>
   )
@@ -477,18 +482,16 @@ function ChannelsList({
 
 function ChannelRow({
   meta,
-  hidden,
   onClick,
 }: {
   meta: ChannelMeta
-  hidden: boolean
   onClick: () => void
 }) {
   const { label, channel } = meta
   return (
     <button
       onClick={onClick}
-      title={hidden ? `Show ${label}` : `Hide ${label}`}
+      title={`Hide all ${channel.kind} channels`}
       style={{
         appearance: 'none',
         background: 'transparent',
@@ -499,8 +502,7 @@ function ChannelRow({
         padding: '5px 0',
         cursor: 'pointer',
         textAlign: 'left',
-        opacity: hidden ? 0.45 : 1,
-        transition: 'opacity 120ms, background 120ms',
+        transition: 'background 120ms',
         borderRadius: 4,
       }}
       onMouseEnter={(e) => { e.currentTarget.style.background = theme.surface }}
@@ -509,9 +511,7 @@ function ChannelRow({
       <span
         style={{
           width: 8, height: 8, borderRadius: '50%',
-          background: hidden ? 'transparent' : theme.accent,
-          border: `1.5px solid ${theme.accent}`,
-          boxSizing: 'border-box',
+          background: theme.accent,
           flexShrink: 0,
         }}
       />
