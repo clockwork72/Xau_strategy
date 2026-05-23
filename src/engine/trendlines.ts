@@ -14,6 +14,33 @@ export interface Channel {
   kind: ChannelKind     // which rail was touch-scored
 }
 
+/**
+ * A channel paired with display metadata. Labels (R1/R2/S1/S2…) are assigned
+ * by enumeration order over the full detected list, so a hidden channel keeps
+ * its label and the visible numbering can have gaps. Signature is a stable
+ * key for hide-state persistence across recomputes — same anchor times = same
+ * sig, so toggling Hide survives replay scrubs as long as the algo re-detects
+ * the same anchored channel.
+ */
+export interface ChannelMeta {
+  channel: Channel
+  sig: string
+  label: string
+}
+
+export function channelSignature(c: Pick<Channel, 'kind' | 'startTime' | 'endTime'>): string {
+  return `${c.kind}|${c.startTime}|${c.endTime}`
+}
+
+export function withChannelMeta(channels: ReadonlyArray<Channel>): ChannelMeta[] {
+  let resCount = 0
+  let supCount = 0
+  return channels.map((channel) => {
+    const label = channel.kind === 'resistance' ? `R${++resCount}` : `S${++supCount}`
+    return { channel, sig: channelSignature(channel), label }
+  })
+}
+
 const TOUCH_PCT = 0.0006 // 0.06% of mid-window price ≈ $2.70 on $4500 gold
 const MIN_TOUCHES = 3
 

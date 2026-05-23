@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { theme, fonts, sizes } from '../theme'
 import type { Candle, Timeframe } from '../types'
 import type { StrategyStats } from '../engine/portfolio'
+import type { ChannelMeta } from '../engine/trendlines'
 import { DISPLAY_TZ_LABEL, formatCrosshair } from '../util/time'
 
 interface Props {
@@ -14,6 +15,10 @@ interface Props {
   startingBalance: number
   onStartingBalanceChange: (n: number) => void
   markPrice: number | null
+  channelsMeta: ChannelMeta[]
+  hiddenChannelSigs: ReadonlySet<string>
+  onToggleChannelHidden: (sig: string) => void
+  onClearHiddenChannels: () => void
 }
 
 export default function RightPanels({
@@ -26,6 +31,10 @@ export default function RightPanels({
   startingBalance,
   onStartingBalanceChange,
   markPrice,
+  channelsMeta,
+  hiddenChannelSigs,
+  onToggleChannelHidden,
+  onClearHiddenChannels,
 }: Props) {
   return (
     <aside
@@ -47,6 +56,12 @@ export default function RightPanels({
         startingBalance={startingBalance}
         onStartingBalanceChange={onStartingBalanceChange}
         markPrice={markPrice}
+      />
+      <ChannelsList
+        channels={channelsMeta}
+        hiddenSigs={hiddenChannelSigs}
+        onToggle={onToggleChannelHidden}
+        onClear={onClearHiddenChannels}
       />
       <BarInspector hovered={hovered} />
       <Notes timeframe={timeframe} />
@@ -398,6 +413,147 @@ function formatSignedPct(n: number): string {
   if (n === 0) return '0.00%'
   const sign = n > 0 ? '+' : '−'
   return `${sign}${Math.abs(n).toFixed(2)}%`
+}
+
+// ---------- Channels (algo-detected) ----------
+function ChannelsList({
+  channels,
+  hiddenSigs,
+  onToggle,
+  onClear,
+}: {
+  channels: ChannelMeta[]
+  hiddenSigs: ReadonlySet<string>
+  onToggle: (sig: string) => void
+  onClear: () => void
+}) {
+  const hiddenCount = channels.reduce((n, m) => (hiddenSigs.has(m.sig) ? n + 1 : n), 0)
+  const extra =
+    channels.length === 0
+      ? undefined
+      : hiddenCount > 0
+      ? `${channels.length} · ${hiddenCount} hidden`
+      : `${channels.length}`
+
+  return (
+    <Panel label="Channels" extra={extra}>
+      {channels.length === 0 ? (
+        <Placeholder text="— none detected" />
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {channels.map((m) => {
+            const hidden = hiddenSigs.has(m.sig)
+            return (
+              <ChannelRow
+                key={m.sig}
+                meta={m}
+                hidden={hidden}
+                onClick={() => onToggle(m.sig)}
+              />
+            )
+          })}
+          {hiddenCount > 0 && (
+            <button
+              onClick={onClear}
+              style={{
+                appearance: 'none',
+                background: 'transparent',
+                border: 'none',
+                color: theme.textMuted,
+                fontFamily: fonts.mono,
+                fontSize: 10,
+                letterSpacing: 0.5,
+                padding: '6px 0 2px',
+                textAlign: 'left',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = theme.text }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = theme.textMuted }}
+            >
+              show all
+            </button>
+          )}
+        </div>
+      )}
+    </Panel>
+  )
+}
+
+function ChannelRow({
+  meta,
+  hidden,
+  onClick,
+}: {
+  meta: ChannelMeta
+  hidden: boolean
+  onClick: () => void
+}) {
+  const { label, channel } = meta
+  return (
+    <button
+      onClick={onClick}
+      title={hidden ? `Show ${label}` : `Hide ${label}`}
+      style={{
+        appearance: 'none',
+        background: 'transparent',
+        border: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '5px 0',
+        cursor: 'pointer',
+        textAlign: 'left',
+        opacity: hidden ? 0.45 : 1,
+        transition: 'opacity 120ms, background 120ms',
+        borderRadius: 4,
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = theme.surface }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+    >
+      <span
+        style={{
+          width: 8, height: 8, borderRadius: '50%',
+          background: hidden ? 'transparent' : theme.accent,
+          border: `1.5px solid ${theme.accent}`,
+          boxSizing: 'border-box',
+          flexShrink: 0,
+        }}
+      />
+      <span
+        style={{
+          fontFamily: fonts.mono,
+          fontSize: 11,
+          color: theme.accent,
+          letterSpacing: 0.4,
+          minWidth: 26,
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        {label}
+      </span>
+      <span
+        style={{
+          flex: 1,
+          fontSize: 11,
+          color: theme.textMuted,
+          fontFamily: fonts.mono,
+          letterSpacing: 0.3,
+        }}
+      >
+        {channel.kind}
+      </span>
+      <span
+        style={{
+          fontSize: 10,
+          color: theme.textInactive,
+          fontFamily: fonts.mono,
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        {channel.touches} touches
+      </span>
+    </button>
+  )
 }
 
 // ---------- Bar Inspector ----------

@@ -21,7 +21,7 @@ import { computeEma } from '../engine/indicators'
 import { runPriceActionBeta } from '../engine/priceActionBeta'
 import { computeStats } from '../engine/portfolio'
 import { findSwingHighs, findSwingLows, type SwingPoint } from '../engine/swings'
-import { pickChannels } from '../engine/trendlines'
+import { pickChannels, withChannelMeta, type ChannelMeta } from '../engine/trendlines'
 import type { SessionToggles } from '../engine/sessions'
 import {
   HORIZONTAL_EXTEND_SEC,
@@ -147,6 +147,7 @@ export default function TradingResearchSandbox() {
   const colors = palettes[themeMode]
   const [activeTool, setActiveTool] = useState<DrawTool>('cursor')
   const [snapEnabled, setSnapEnabled] = useState(true)
+  const [hiddenChannelSigs, setHiddenChannelSigs] = useState<ReadonlySet<string>>(() => new Set())
   const [drawnLines, setDrawnLines] = useState<DrawnLine[]>([])
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null)
   const [strategyEnabled, setStrategyEnabled] = useState(true)
@@ -722,59 +723,46 @@ export default function TradingResearchSandbox() {
     lastEmaSettingsRef.current = { length: emaLength, enabled: true }
   }, [visibleCandles, emaLength, emaEnabled, chartsReady])
 
+  // Swings always computed (independent of the trendline overlay toggle) so
+  // both the draw-tool snap and the channel detector can read them.
+  const drawSwings = useMemo(() => ({
+    highs: findSwingHighs(visibleCandles, TRENDLINE_LOOKBACK),
+    lows: findSwingLows(visibleCandles, TRENDLINE_LOOKBACK),
+  }), [visibleCandles])
+  useEffect(() => { swingsRef.current = drawSwings }, [drawSwings])
+
   // ---------- Trendline channels: touch-scored across all pivot pairs.
   // pickChannels returns distinct non-overlapping channels with ≥3 touches.
+  // Labels (R1/R2/S1/S2…) are assigned by full enumeration order, so a
+  // hidden channel keeps its label and the visible chart can have gaps.
+  const channelsMeta = useMemo<ChannelMeta[]>(() => {
+    if (!trendlineEnabled || visibleCandles.length === 0) return []
+    const channels = [
+      ...pickChannels(drawSwings.highs, visibleCandles, 'resistance'),
+      ...pickChannels(drawSwings.lows, visibleCandles, 'support'),
+    ]
+    // ---- DISABLED: cross-kind non-overlap (keeps broader, drops smaller) ----
+    // Re-enable by sorting all candidates by (endTime - startTime) desc and
+    // dropping any that overlaps an already-accepted one in time.
+    // ---- /DISABLED ----
+    return withChannelMeta(channels)
+  }, [drawSwings, trendlineEnabled, visibleCandles])
+
   useEffect(() => {
     const chart = priceChartRef.current
     if (!chart) return
     const pool = channelsSeriesPoolRef.current
 
-    const clearAll = () => {
-      for (const p of pool) {
-        p.res.setData([])
-        p.sup.setData([])
-      }
+    const clearPoolSlot = (i: number) => {
+      pool[i].res.setData([])
+      pool[i].sup.setData([])
+      pool[i].res.setMarkers([])
+      pool[i].sup.setMarkers([])
     }
 
-    if (!trendlineEnabled || visibleCandles.length === 0) {
-      clearAll()
-      return
-    }
-    const highs = findSwingHighs(visibleCandles, TRENDLINE_LOOKBACK)
-    const lows = findSwingLows(visibleCandles, TRENDLINE_LOOKBACK)
-    const channels = [
-      ...pickChannels(highs, visibleCandles, 'resistance'),
-      ...pickChannels(lows, visibleCandles, 'support'),
-    ]
-    // ---- DISABLED: cross-kind non-overlap (keeps broader, drops smaller) ----
-    // Re-enable by replacing the merge above with this block:
-    //
-    // const allCandidates = [
-    //   ...pickChannels(highs, visibleCandles, 'resistance'),
-    //   ...pickChannels(lows, visibleCandles, 'support'),
-    // ]
-    // const sorted = [...allCandidates].sort(
-    //   (a, b) => b.endTime - b.startTime - (a.endTime - a.startTime),
-    // )
-    // const channels: typeof allCandidates = []
-    // const acceptedRanges: Array<[number, number]> = []
-    // for (const c of sorted) {
-    //   const overlaps = acceptedRanges.some(
-    //     ([s, e]) => !(c.endTime < s || c.startTime > e),
-    //   )
-    //   if (!overlaps) {
-    //     channels.push(c)
-    //     acceptedRanges.push([c.startTime, c.endTime])
-    //   }
-    // }
-    // ---- /DISABLED ----
-    if (channels.length === 0) {
-      clearAll()
-      return
-    }
+    const visible = channelsMeta.filter((m) => !hiddenChannelSigs.has(m.sig))
 
-    // Grow pool to fit channel count.
-    while (pool.length < channels.length) {
+    while (pool.length < visible.length) {
       pool.push({
         res: chart.addLineSeries({
           color: colors.accent,
@@ -793,8 +781,8 @@ export default function TradingResearchSandbox() {
       })
     }
 
-    for (let i = 0; i < channels.length; i++) {
-      const ch = channels[i]
+    for (let i = 0; i < visible.length; i++) {
+      const ch = visible[i].channel
       pool[i].res.setData([
         { time: ch.startTime as Time, value: ch.upperStart },
         { time: ch.endTime as Time, value: ch.upperEnd },
@@ -803,14 +791,26 @@ export default function TradingResearchSandbox() {
         { time: ch.startTime as Time, value: ch.lowerStart },
         { time: ch.endTime as Time, value: ch.lowerEnd },
       ])
+      const isRes = ch.kind === 'resistance'
+      const label = visible[i].label
+      pool[i].res.setMarkers(isRes ? [{
+        time: ch.startTime as Time,
+        position: 'aboveBar',
+        color: colors.accent,
+        shape: 'circle',
+        text: label,
+      }] : [])
+      pool[i].sup.setMarkers(!isRes ? [{
+        time: ch.startTime as Time,
+        position: 'belowBar',
+        color: colors.accent,
+        shape: 'circle',
+        text: label,
+      }] : [])
     }
 
-    // Hide unused pool entries.
-    for (let i = channels.length; i < pool.length; i++) {
-      pool[i].res.setData([])
-      pool[i].sup.setData([])
-    }
-  }, [visibleCandles, trendlineEnabled, chartsReady])
+    for (let i = visible.length; i < pool.length; i++) clearPoolSlot(i)
+  }, [channelsMeta, hiddenChannelSigs, chartsReady, colors])
 
   // Mirror tool state into refs for the chart click handler.
   // Switching away from trendline mid-draw clears the pending anchor.
@@ -825,14 +825,6 @@ export default function TradingResearchSandbox() {
   useEffect(() => { drawnLinesRef.current = drawnLines }, [drawnLines])
   useEffect(() => { selectedLineIdRef.current = selectedLineId }, [selectedLineId])
   useEffect(() => { visibleCandlesRef.current = visibleCandles }, [visibleCandles])
-
-  // Swings always computed (independent of the trendline overlay toggle) so
-  // the draw-tool snap can target them at any time.
-  const drawSwings = useMemo(() => ({
-    highs: findSwingHighs(visibleCandles, TRENDLINE_LOOKBACK),
-    lows: findSwingLows(visibleCandles, TRENDLINE_LOOKBACK),
-  }), [visibleCandles])
-  useEffect(() => { swingsRef.current = drawSwings }, [drawSwings])
 
   // ---------- theme sync ----------
   // Updates the document attribute (so CSS vars switch palette), persists
@@ -880,6 +872,16 @@ export default function TradingResearchSandbox() {
   }, [themeMode])
 
   const toggleTheme = () => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))
+
+  const toggleChannelHidden = (sig: string) => {
+    setHiddenChannelSigs((prev) => {
+      const next = new Set(prev)
+      if (next.has(sig)) next.delete(sig)
+      else next.add(sig)
+      return next
+    })
+  }
+  const clearHiddenChannels = () => setHiddenChannelSigs(new Set())
 
   // ---------- keyboard: draw tool shortcuts ----------
   // V cursor · T trendline · H horizontal · S snap toggle
@@ -1163,6 +1165,10 @@ export default function TradingResearchSandbox() {
           startingBalance={startingBalance}
           onStartingBalanceChange={setStartingBalance}
           markPrice={markPrice}
+          channelsMeta={channelsMeta}
+          hiddenChannelSigs={hiddenChannelSigs}
+          onToggleChannelHidden={toggleChannelHidden}
+          onClearHiddenChannels={clearHiddenChannels}
         />
       </div>
 
