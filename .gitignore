@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-electron/
+build/
+out/
+.vite/
+
+# Logs
+*.log
+session.log
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local agent / harness state (not part of the project)
+.agents/
+skills-lock.json
