@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { theme, fonts, sizes } from '../theme'
 import type { Timeframe } from '../types'
-import { parseCasaLocalToUtcSec } from '../util/time'
+import { formatCrosshair, parseCasaLocalToUtcSec } from '../util/time'
 
 interface Props {
   timeframe: Timeframe
@@ -10,6 +10,7 @@ interface Props {
   onRangeFit: () => void
   initialRangeStart?: string
   initialRangeEnd?: string
+  dataBounds: { from: number; to: number } | null
   emaEnabled: boolean
   onEmaEnabledChange: (v: boolean) => void
   emaLength: number
@@ -30,6 +31,7 @@ export default function LeftNav({
   onRangeFit,
   initialRangeStart,
   initialRangeEnd,
+  dataBounds,
   emaEnabled,
   onEmaEnabledChange,
   emaLength,
@@ -76,6 +78,7 @@ export default function LeftNav({
           onFit={onRangeFit}
           initialStart={initialRangeStart}
           initialEnd={initialRangeEnd}
+          dataBounds={dataBounds}
         />
       </Section>
 
@@ -313,20 +316,31 @@ function RangePicker({
   onFit,
   initialStart,
   initialEnd,
+  dataBounds,
 }: {
   onApply: (fromSec: number, toSec: number) => void
   onFit: () => void
   initialStart?: string
   initialEnd?: string
+  dataBounds: { from: number; to: number } | null
 }) {
   const [start, setStart] = useState(initialStart ?? '')
   const [end, setEnd] = useState(initialEnd ?? '')
   const startSec = start ? parseCasaLocalToUtcSec(start) : null
   const endSec = end ? parseCasaLocalToUtcSec(end) : null
-  const startInvalid = start.length > 0 && startSec === null
-  const endInvalid = end.length > 0 && endSec === null
+  const startParseInvalid = start.length > 0 && startSec === null
+  const endParseInvalid = end.length > 0 && endSec === null
   const orderInvalid = startSec !== null && endSec !== null && startSec >= endSec
-  const canApply = startSec !== null && endSec !== null && !orderInvalid
+  const outOfBounds =
+    dataBounds !== null &&
+    ((startSec !== null && (startSec < dataBounds.from || startSec > dataBounds.to)) ||
+      (endSec !== null && (endSec < dataBounds.from || endSec > dataBounds.to)))
+  const startOutOfBounds =
+    dataBounds !== null && startSec !== null && (startSec < dataBounds.from || startSec > dataBounds.to)
+  const endOutOfBounds =
+    dataBounds !== null && endSec !== null && (endSec < dataBounds.from || endSec > dataBounds.to)
+  const canApply =
+    startSec !== null && endSec !== null && !orderInvalid && !outOfBounds
 
   const apply = () => {
     if (canApply) onApply(startSec!, endSec!)
@@ -337,14 +351,14 @@ function RangePicker({
       <RangeInput
         label="Start"
         value={start}
-        invalid={startInvalid}
+        invalid={startParseInvalid || startOutOfBounds}
         onChange={setStart}
         onSubmit={apply}
       />
       <RangeInput
         label="End"
         value={end}
-        invalid={endInvalid || orderInvalid}
+        invalid={endParseInvalid || endOutOfBounds || orderInvalid}
         onChange={setEnd}
         onSubmit={apply}
       />
@@ -363,6 +377,16 @@ function RangePicker({
       {orderInvalid && (
         <span style={{ fontSize: 9, color: theme.down, fontFamily: fonts.mono }}>
           end must be after start
+        </span>
+      )}
+      {outOfBounds && !orderInvalid && (
+        <span style={{ fontSize: 9, color: theme.down, fontFamily: fonts.mono }}>
+          outside data range
+        </span>
+      )}
+      {dataBounds && (
+        <span style={{ fontSize: 9, color: theme.textInactive, fontFamily: fonts.mono, letterSpacing: 0.3 }}>
+          data: {formatCrosshair(dataBounds.from)} → {formatCrosshair(dataBounds.to)}
         </span>
       )}
     </div>

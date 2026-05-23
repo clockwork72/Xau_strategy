@@ -11,6 +11,10 @@ export interface DatasetsState {
   data1m: DatasetBundle
   data5m: DatasetBundle
   loadStatus: LoadStatus
+  // First and last bar time of the active dataset in UTC seconds. Lets the
+  // range picker reject Apply on out-of-data inputs instead of silently
+  // producing an empty replay window.
+  dataBounds: { from: number; to: number } | null
 }
 
 /**
@@ -48,5 +52,14 @@ export function useDatasets(): DatasetsState {
 
   const active = useMemo(() => (timeframe === '1m' ? data1m : data5m), [timeframe, data1m, data5m])
 
-  return { timeframe, setTimeframe, active, data1m, data5m, loadStatus }
+  const dataBounds = useMemo<{ from: number; to: number } | null>(() => {
+    const candles = active.candles
+    if (candles.length === 0) return null
+    return {
+      from: candles[0].time as number,
+      to: candles[candles.length - 1].time as number,
+    }
+  }, [active])
+
+  return { timeframe, setTimeframe, active, data1m, data5m, loadStatus, dataBounds }
 }

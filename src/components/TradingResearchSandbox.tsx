@@ -132,7 +132,7 @@ export default function TradingResearchSandbox() {
   const lastEmaSettingsRef = useRef<{ length: number; enabled: boolean }>({ length: 0, enabled: false })
 
   // ---------- data state ----------
-  const { timeframe, setTimeframe, active, loadStatus } = useDatasets()
+  const { timeframe, setTimeframe, active, loadStatus, dataBounds } = useDatasets()
 
   // ---------- ui state ----------
   const [hoveredTime, setHoveredTime] = useState<number | null>(null)
@@ -1142,6 +1142,7 @@ export default function TradingResearchSandbox() {
           onRangeFit={handleRangeFit}
           initialRangeStart={DEFAULT_RANGE_START_CASA}
           initialRangeEnd={DEFAULT_RANGE_END_CASA}
+          dataBounds={dataBounds}
           emaEnabled={emaEnabled}
           onEmaEnabledChange={setEmaEnabled}
           emaLength={emaLength}
