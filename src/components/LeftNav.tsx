@@ -16,8 +16,10 @@ interface Props {
   onEmaLengthChange: (n: number) => void
   sessionsEnabled: boolean
   onSessionsEnabledChange: (v: boolean) => void
-  trendlineEnabled: boolean
-  onTrendlineEnabledChange: (v: boolean) => void
+  showResistance: boolean
+  onShowResistanceChange: (v: boolean) => void
+  showSupport: boolean
+  onShowSupportChange: (v: boolean) => void
   strategyEnabled: boolean
   onStrategyEnabledChange: (v: boolean) => void
   signalCount: number
@@ -36,8 +38,10 @@ export default function LeftNav({
   onEmaLengthChange,
   sessionsEnabled,
   onSessionsEnabledChange,
-  trendlineEnabled,
-  onTrendlineEnabledChange,
+  showResistance,
+  onShowResistanceChange,
+  showSupport,
+  onShowSupportChange,
   strategyEnabled,
   onStrategyEnabledChange,
   signalCount,
@@ -88,9 +92,14 @@ export default function LeftNav({
         />
         <SessionsRow enabled={sessionsEnabled} onChange={onSessionsEnabledChange} />
         <SimpleToggleRow
-          label="Trendline"
-          enabled={trendlineEnabled}
-          onChange={onTrendlineEnabledChange}
+          label="Resistance"
+          enabled={showResistance}
+          onChange={onShowResistanceChange}
+        />
+        <SimpleToggleRow
+          label="Support"
+          enabled={showSupport}
+          onChange={onShowSupportChange}
         />
       </Section>
 

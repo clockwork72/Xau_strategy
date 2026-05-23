@@ -139,7 +139,8 @@ export default function TradingResearchSandbox() {
   const showSessionLabels = sessionsEnabled
   const [emaEnabled, setEmaEnabled] = useState(true)
   const [emaLength, setEmaLength] = useState(21)
-  const [trendlineEnabled, setTrendlineEnabled] = useState(true)
+  const [showResistance, setShowResistance] = useState(true)
+  const [showSupport, setShowSupport] = useState(true)
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     if (typeof window === 'undefined') return 'dark'
     return localStorage.getItem('xau:theme') === 'light' ? 'light' : 'dark'
@@ -736,17 +737,18 @@ export default function TradingResearchSandbox() {
   // Labels (R1/R2/S1/S2…) are assigned by full enumeration order, so a
   // hidden channel keeps its label and the visible chart can have gaps.
   const channelsMeta = useMemo<ChannelMeta[]>(() => {
-    if (!trendlineEnabled || visibleCandles.length === 0) return []
+    if (visibleCandles.length === 0) return []
+    if (!showResistance && !showSupport) return []
     const channels = [
-      ...pickChannels(drawSwings.highs, visibleCandles, 'resistance'),
-      ...pickChannels(drawSwings.lows, visibleCandles, 'support'),
+      ...(showResistance ? pickChannels(drawSwings.highs, visibleCandles, 'resistance') : []),
+      ...(showSupport ? pickChannels(drawSwings.lows, visibleCandles, 'support') : []),
     ]
     // ---- DISABLED: cross-kind non-overlap (keeps broader, drops smaller) ----
     // Re-enable by sorting all candidates by (endTime - startTime) desc and
     // dropping any that overlaps an already-accepted one in time.
     // ---- /DISABLED ----
     return withChannelMeta(channels)
-  }, [drawSwings, trendlineEnabled, visibleCandles])
+  }, [drawSwings, showResistance, showSupport, visibleCandles])
 
   useEffect(() => {
     const chart = priceChartRef.current
@@ -1120,8 +1122,10 @@ export default function TradingResearchSandbox() {
           onEmaLengthChange={setEmaLength}
           sessionsEnabled={sessionsEnabled}
           onSessionsEnabledChange={setSessionsEnabled}
-          trendlineEnabled={trendlineEnabled}
-          onTrendlineEnabledChange={setTrendlineEnabled}
+          showResistance={showResistance}
+          onShowResistanceChange={setShowResistance}
+          showSupport={showSupport}
+          onShowSupportChange={setShowSupport}
           strategyEnabled={strategyEnabled}
           onStrategyEnabledChange={setStrategyEnabled}
           signalCount={signals.length}
