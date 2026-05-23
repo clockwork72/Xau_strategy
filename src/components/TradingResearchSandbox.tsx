@@ -139,8 +139,7 @@ export default function TradingResearchSandbox() {
   const showSessionLabels = sessionsEnabled
   const [emaEnabled, setEmaEnabled] = useState(true)
   const [emaLength, setEmaLength] = useState(21)
-  const [showResistance, setShowResistance] = useState(true)
-  const [showSupport, setShowSupport] = useState(true)
+  const [trendlineEnabled, setTrendlineEnabled] = useState(true)
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     if (typeof window === 'undefined') return 'dark'
     return localStorage.getItem('xau:theme') === 'light' ? 'light' : 'dark'
@@ -148,6 +147,7 @@ export default function TradingResearchSandbox() {
   const colors = palettes[themeMode]
   const [activeTool, setActiveTool] = useState<DrawTool>('cursor')
   const [snapEnabled, setSnapEnabled] = useState(true)
+  const [hiddenChannelSigs, setHiddenChannelSigs] = useState<ReadonlySet<string>>(() => new Set())
   const [drawnLines, setDrawnLines] = useState<DrawnLine[]>([])
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null)
   const [strategyEnabled, setStrategyEnabled] = useState(true)
@@ -736,18 +736,17 @@ export default function TradingResearchSandbox() {
   // Labels (R1/R2/S1/S2…) are assigned by full enumeration order, so a
   // hidden channel keeps its label and the visible chart can have gaps.
   const channelsMeta = useMemo<ChannelMeta[]>(() => {
-    if (visibleCandles.length === 0) return []
-    if (!showResistance && !showSupport) return []
+    if (!trendlineEnabled || visibleCandles.length === 0) return []
     const channels = [
-      ...(showResistance ? pickChannels(drawSwings.highs, visibleCandles, 'resistance') : []),
-      ...(showSupport ? pickChannels(drawSwings.lows, visibleCandles, 'support') : []),
+      ...pickChannels(drawSwings.highs, visibleCandles, 'resistance'),
+      ...pickChannels(drawSwings.lows, visibleCandles, 'support'),
     ]
     // ---- DISABLED: cross-kind non-overlap (keeps broader, drops smaller) ----
     // Re-enable by sorting all candidates by (endTime - startTime) desc and
     // dropping any that overlaps an already-accepted one in time.
     // ---- /DISABLED ----
     return withChannelMeta(channels)
-  }, [drawSwings, showResistance, showSupport, visibleCandles])
+  }, [drawSwings, trendlineEnabled, visibleCandles])
 
   useEffect(() => {
     const chart = priceChartRef.current
@@ -761,7 +760,7 @@ export default function TradingResearchSandbox() {
       pool[i].sup.setMarkers([])
     }
 
-    const visible = channelsMeta
+    const visible = channelsMeta.filter((m) => !hiddenChannelSigs.has(m.sig))
 
     while (pool.length < visible.length) {
       pool.push({
@@ -784,49 +783,34 @@ export default function TradingResearchSandbox() {
 
     for (let i = 0; i < visible.length; i++) {
       const ch = visible[i].channel
+      pool[i].res.setData([
+        { time: ch.startTime as Time, value: ch.upperStart },
+        { time: ch.endTime as Time, value: ch.upperEnd },
+      ])
+      pool[i].sup.setData([
+        { time: ch.startTime as Time, value: ch.lowerStart },
+        { time: ch.endTime as Time, value: ch.lowerEnd },
+      ])
       const isRes = ch.kind === 'resistance'
       const label = visible[i].label
-      // Per-rail visibility: the toggle hides every rail of that side,
-      // including the derived parallel rail on the other-kind channel. So
-      // "Resistance off" → no upper lines anywhere; "Support off" → no
-      // lower lines anywhere.
-      if (showResistance) {
-        pool[i].res.setData([
-          { time: ch.startTime as Time, value: ch.upperStart },
-          { time: ch.endTime as Time, value: ch.upperEnd },
-        ])
-        pool[i].res.setMarkers(isRes ? [{
-          time: ch.startTime as Time,
-          position: 'aboveBar',
-          color: colors.accent,
-          shape: 'circle',
-          text: label,
-        }] : [])
-      } else {
-        pool[i].res.setData([])
-        pool[i].res.setMarkers([])
-      }
-
-      if (showSupport) {
-        pool[i].sup.setData([
-          { time: ch.startTime as Time, value: ch.lowerStart },
-          { time: ch.endTime as Time, value: ch.lowerEnd },
-        ])
-        pool[i].sup.setMarkers(!isRes ? [{
-          time: ch.startTime as Time,
-          position: 'belowBar',
-          color: colors.accent,
-          shape: 'circle',
-          text: label,
-        }] : [])
-      } else {
-        pool[i].sup.setData([])
-        pool[i].sup.setMarkers([])
-      }
+      pool[i].res.setMarkers(isRes ? [{
+        time: ch.startTime as Time,
+        position: 'aboveBar',
+        color: colors.accent,
+        shape: 'circle',
+        text: label,
+      }] : [])
+      pool[i].sup.setMarkers(!isRes ? [{
+        time: ch.startTime as Time,
+        position: 'belowBar',
+        color: colors.accent,
+        shape: 'circle',
+        text: label,
+      }] : [])
     }
 
     for (let i = visible.length; i < pool.length; i++) clearPoolSlot(i)
-  }, [channelsMeta, chartsReady, colors, showResistance, showSupport])
+  }, [channelsMeta, hiddenChannelSigs, chartsReady, colors])
 
   // Mirror tool state into refs for the chart click handler.
   // Switching away from trendline mid-draw clears the pending anchor.
@@ -889,6 +873,15 @@ export default function TradingResearchSandbox() {
 
   const toggleTheme = () => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))
 
+  const toggleChannelHidden = (sig: string) => {
+    setHiddenChannelSigs((prev) => {
+      const next = new Set(prev)
+      if (next.has(sig)) next.delete(sig)
+      else next.add(sig)
+      return next
+    })
+  }
+  const clearHiddenChannels = () => setHiddenChannelSigs(new Set())
 
   // ---------- keyboard: draw tool shortcuts ----------
   // V cursor · T trendline · H horizontal · S snap toggle
@@ -1127,10 +1120,8 @@ export default function TradingResearchSandbox() {
           onEmaLengthChange={setEmaLength}
           sessionsEnabled={sessionsEnabled}
           onSessionsEnabledChange={setSessionsEnabled}
-          showResistance={showResistance}
-          onShowResistanceChange={setShowResistance}
-          showSupport={showSupport}
-          onShowSupportChange={setShowSupport}
+          trendlineEnabled={trendlineEnabled}
+          onTrendlineEnabledChange={setTrendlineEnabled}
           strategyEnabled={strategyEnabled}
           onStrategyEnabledChange={setStrategyEnabled}
           signalCount={signals.length}
@@ -1174,6 +1165,10 @@ export default function TradingResearchSandbox() {
           startingBalance={startingBalance}
           onStartingBalanceChange={setStartingBalance}
           markPrice={markPrice}
+          channelsMeta={channelsMeta}
+          hiddenChannelSigs={hiddenChannelSigs}
+          onToggleChannelHidden={toggleChannelHidden}
+          onClearHiddenChannels={clearHiddenChannels}
         />
       </div>
 

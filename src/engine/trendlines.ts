@@ -41,41 +41,6 @@ export function withChannelMeta(channels: ReadonlyArray<Channel>): ChannelMeta[]
   })
 }
 
-/**
- * Geometric fingerprint — kind + slope + y-position at a reference time.
- * Used for sticky per-channel hide: a re-anchored same-geometry channel
- * matches its fingerprint even though its sig changed (because anchor times
- * shifted as new pivots fit). Tolerances: 10% relative slope + 0.1% of price
- * for y at a common reference (~$4.5 on $4500 gold).
- */
-export interface ChannelFingerprint {
-  kind: ChannelKind
-  slope: number    // upper rail slope (price units per second)
-  refTime: number  // reference timestamp (we use startTime)
-  refY: number     // upper rail y at refTime
-}
-
-const FP_SLOPE_TOL = 0.10
-const FP_Y_TOL_PCT = 0.001
-
-export function makeFingerprint(c: Channel): ChannelFingerprint {
-  const dt = c.endTime - c.startTime || 1
-  const slope = (c.upperEnd - c.upperStart) / dt
-  return { kind: c.kind, slope, refTime: c.startTime, refY: c.upperStart }
-}
-
-export function channelMatchesFingerprint(c: Channel, fp: ChannelFingerprint): boolean {
-  if (c.kind !== fp.kind) return false
-  const dt = c.endTime - c.startTime || 1
-  const slope = (c.upperEnd - c.upperStart) / dt
-  const slopeRef = Math.max(Math.abs(slope), Math.abs(fp.slope), 1e-9)
-  if (Math.abs(slope - fp.slope) / slopeRef > FP_SLOPE_TOL) return false
-  const yFpAtCStart = fp.refY + fp.slope * (c.startTime - fp.refTime)
-  const yDiff = Math.abs(c.upperStart - yFpAtCStart)
-  const yEps = Math.max(Math.abs(c.upperStart), 1) * FP_Y_TOL_PCT
-  return yDiff <= yEps
-}
-
 const TOUCH_PCT = 0.0006 // 0.06% of mid-window price ≈ $2.70 on $4500 gold
 const MIN_TOUCHES = 3
 
