@@ -147,6 +147,11 @@ export default function TradingResearchSandbox() {
   const colors = palettes[themeMode]
   const [activeTool, setActiveTool] = useState<DrawTool>('cursor')
   const [snapEnabled, setSnapEnabled] = useState(true)
+  // Kind-level visibility — toggling Resistance off skips detection of
+  // R-kind channels entirely (R1/R2/... gone, both rails + label). Persists
+  // across replay because it's just two booleans gating pickChannels.
+  const [showResistance, setShowResistance] = useState(true)
+  const [showSupport, setShowSupport] = useState(true)
   const [hiddenChannelSigs, setHiddenChannelSigs] = useState<ReadonlySet<string>>(() => new Set())
   const [drawnLines, setDrawnLines] = useState<DrawnLine[]>([])
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null)
@@ -738,15 +743,15 @@ export default function TradingResearchSandbox() {
   const channelsMeta = useMemo<ChannelMeta[]>(() => {
     if (!trendlineEnabled || visibleCandles.length === 0) return []
     const channels = [
-      ...pickChannels(drawSwings.highs, visibleCandles, 'resistance'),
-      ...pickChannels(drawSwings.lows, visibleCandles, 'support'),
+      ...(showResistance ? pickChannels(drawSwings.highs, visibleCandles, 'resistance') : []),
+      ...(showSupport ? pickChannels(drawSwings.lows, visibleCandles, 'support') : []),
     ]
     // ---- DISABLED: cross-kind non-overlap (keeps broader, drops smaller) ----
     // Re-enable by sorting all candidates by (endTime - startTime) desc and
     // dropping any that overlaps an already-accepted one in time.
     // ---- /DISABLED ----
     return withChannelMeta(channels)
-  }, [drawSwings, trendlineEnabled, visibleCandles])
+  }, [drawSwings, trendlineEnabled, visibleCandles, showResistance, showSupport])
 
   useEffect(() => {
     const chart = priceChartRef.current
@@ -882,6 +887,10 @@ export default function TradingResearchSandbox() {
     })
   }
   const clearHiddenChannels = () => setHiddenChannelSigs(new Set())
+  const toggleChannelKind = (kind: 'resistance' | 'support') => {
+    if (kind === 'resistance') setShowResistance((v) => !v)
+    else setShowSupport((v) => !v)
+  }
 
   // ---------- keyboard: draw tool shortcuts ----------
   // V cursor · T trendline · H horizontal · S snap toggle
@@ -1169,6 +1178,9 @@ export default function TradingResearchSandbox() {
           hiddenChannelSigs={hiddenChannelSigs}
           onToggleChannelHidden={toggleChannelHidden}
           onClearHiddenChannels={clearHiddenChannels}
+          showResistance={showResistance}
+          showSupport={showSupport}
+          onToggleChannelKind={toggleChannelKind}
         />
       </div>
 
