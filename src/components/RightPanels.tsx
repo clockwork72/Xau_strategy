@@ -16,12 +16,12 @@ interface Props {
   onStartingBalanceChange: (n: number) => void
   markPrice: number | null
   channelsMeta: ChannelMeta[]
-  hiddenChannelSigs: ReadonlySet<string>
-  onToggleChannelHidden: (sig: string) => void
-  onClearHiddenChannels: () => void
   showResistance: boolean
   showSupport: boolean
   onToggleChannelKind: (kind: 'resistance' | 'support') => void
+  hiddenChannelLabels: ReadonlySet<string>
+  onToggleChannelLabelHidden: (label: string) => void
+  onClearHiddenChannelLabels: () => void
 }
 
 export default function RightPanels({
@@ -35,12 +35,12 @@ export default function RightPanels({
   onStartingBalanceChange,
   markPrice,
   channelsMeta,
-  hiddenChannelSigs,
-  onToggleChannelHidden,
-  onClearHiddenChannels,
   showResistance,
   showSupport,
   onToggleChannelKind,
+  hiddenChannelLabels,
+  onToggleChannelLabelHidden,
+  onClearHiddenChannelLabels,
 }: Props) {
   return (
     <aside
@@ -65,12 +65,12 @@ export default function RightPanels({
       />
       <ChannelsList
         channels={channelsMeta}
-        hiddenSigs={hiddenChannelSigs}
-        onToggle={onToggleChannelHidden}
-        onClear={onClearHiddenChannels}
         showResistance={showResistance}
         showSupport={showSupport}
         onToggleKind={onToggleChannelKind}
+        hiddenLabels={hiddenChannelLabels}
+        onToggleLabelHidden={onToggleChannelLabelHidden}
+        onClearHiddenLabels={onClearHiddenChannelLabels}
       />
       <BarInspector hovered={hovered} />
       <Notes timeframe={timeframe} />
@@ -427,90 +427,120 @@ function formatSignedPct(n: number): string {
 // ---------- Channels (algo-detected) ----------
 function ChannelsList({
   channels,
-  hiddenSigs,
-  onToggle,
-  onClear,
   showResistance,
   showSupport,
   onToggleKind,
+  hiddenLabels,
+  onToggleLabelHidden,
+  onClearHiddenLabels,
 }: {
   channels: ChannelMeta[]
-  hiddenSigs: ReadonlySet<string>
-  onToggle: (sig: string) => void
-  onClear: () => void
   showResistance: boolean
   showSupport: boolean
   onToggleKind: (kind: 'resistance' | 'support') => void
+  hiddenLabels: ReadonlySet<string>
+  onToggleLabelHidden: (label: string) => void
+  onClearHiddenLabels: () => void
 }) {
-  const hiddenCount = channels.reduce((n, m) => (hiddenSigs.has(m.sig) ? n + 1 : n), 0)
-  const resCount = channels.reduce((n, m) => (m.channel.kind === 'resistance' ? n + 1 : n), 0)
-  const supCount = channels.length - resCount
+  const resistance = channels.filter((m) => m.channel.kind === 'resistance')
+  const support = channels.filter((m) => m.channel.kind === 'support')
+  const enabledChannels =
+    (showResistance ? resistance : []).concat(showSupport ? support : [])
+  const hiddenInScope = enabledChannels.reduce(
+    (n, m) => (hiddenLabels.has(m.label) ? n + 1 : n),
+    0,
+  )
+  const visibleCount = enabledChannels.length - hiddenInScope
   const extra =
-    channels.length === 0
+    enabledChannels.length === 0
       ? undefined
-      : hiddenCount > 0
-      ? `${channels.length} · ${hiddenCount} hidden`
-      : `${channels.length}`
+      : hiddenInScope > 0
+      ? `${visibleCount} · ${hiddenInScope} hidden`
+      : `${visibleCount}`
 
   return (
     <Panel label="Channels" extra={extra}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 6 }}>
-        <KindChip
-          label="Resistance"
-          enabled={showResistance}
-          count={resCount}
-          onClick={() => onToggleKind('resistance')}
-        />
-        <KindChip
-          label="Support"
-          enabled={showSupport}
-          count={supCount}
-          onClick={() => onToggleKind('support')}
-        />
-      </div>
-      {channels.length === 0 ? (
-        <Placeholder text={!showResistance && !showSupport ? '— both kinds off' : '— none detected'} />
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', borderTop: `1px solid ${theme.border}`, paddingTop: 4 }}>
-          {channels.map((m) => {
-            const hidden = hiddenSigs.has(m.sig)
-            return (
-              <ChannelRow
-                key={m.sig}
-                meta={m}
-                hidden={hidden}
-                onClick={() => onToggle(m.sig)}
-              />
-            )
-          })}
-          {hiddenCount > 0 && (
-            <button
-              onClick={onClear}
-              style={{
-                appearance: 'none',
-                background: 'transparent',
-                border: 'none',
-                color: theme.textMuted,
-                fontFamily: fonts.mono,
-                fontSize: 10,
-                letterSpacing: 0.5,
-                padding: '6px 0 2px',
-                textAlign: 'left',
-                cursor: 'pointer',
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.color = theme.text }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = theme.textMuted }}
-            >
-              show all
-            </button>
-          )}
-        </div>
+      <KindSection
+        label="Resistance"
+        enabled={showResistance}
+        channels={resistance}
+        onToggle={() => onToggleKind('resistance')}
+        hiddenLabels={hiddenLabels}
+        onToggleLabelHidden={onToggleLabelHidden}
+      />
+      <KindSection
+        label="Support"
+        enabled={showSupport}
+        channels={support}
+        onToggle={() => onToggleKind('support')}
+        hiddenLabels={hiddenLabels}
+        onToggleLabelHidden={onToggleLabelHidden}
+      />
+      {hiddenInScope > 0 && (
+        <button
+          onClick={onClearHiddenLabels}
+          style={{
+            appearance: 'none',
+            background: 'transparent',
+            border: 'none',
+            color: theme.textMuted,
+            fontFamily: fonts.mono,
+            fontSize: 10,
+            letterSpacing: 0.5,
+            padding: '6px 0 2px',
+            textAlign: 'left',
+            cursor: 'pointer',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = theme.text }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = theme.textMuted }}
+        >
+          show all
+        </button>
       )}
     </Panel>
   )
 }
 
-function KindChip({
+function KindSection({
+  label,
+  enabled,
+  channels,
+  onToggle,
+  hiddenLabels,
+  onToggleLabelHidden,
+}: {
+  label: string
+  enabled: boolean
+  channels: ChannelMeta[]
+  onToggle: () => void
+  hiddenLabels: ReadonlySet<string>
+  onToggleLabelHidden: (label: string) => void
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column' }}>
+      <KindHeader
+        label={label}
+        enabled={enabled}
+        count={channels.length}
+        onClick={onToggle}
+      />
+      {enabled && channels.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', paddingBottom: 4 }}>
+          {channels.map((m) => (
+            <ChannelRow
+              key={`${m.channel.kind}|${m.channel.startTime}`}
+              meta={m}
+              hidden={hiddenLabels.has(m.label)}
+              onClick={() => onToggleLabelHidden(m.label)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function KindHeader({
   label,
   enabled,
   count,
@@ -524,7 +554,7 @@ function KindChip({
   return (
     <button
       onClick={onClick}
-      title={enabled ? `Hide all ${label.toLowerCase()} channels` : `Show ${label.toLowerCase()} channels`}
+      title={enabled ? `Hide ${label.toLowerCase()} channels` : `Show ${label.toLowerCase()} channels`}
       style={{
         appearance: 'none',
         background: 'transparent',
@@ -532,7 +562,7 @@ function KindChip({
         display: 'flex',
         alignItems: 'center',
         gap: 10,
-        padding: '5px 8px',
+        padding: '6px 2px',
         cursor: 'pointer',
         textAlign: 'left',
         borderRadius: 4,
@@ -554,9 +584,10 @@ function KindChip({
         style={{
           flex: 1,
           fontFamily: fonts.mono,
-          fontSize: 12,
+          fontSize: 11,
           color: enabled ? theme.text : theme.textMuted,
-          letterSpacing: 0.4,
+          letterSpacing: 0.5,
+          textTransform: 'uppercase',
         }}
       >
         {label}
@@ -565,13 +596,13 @@ function KindChip({
         style={{
           fontFamily: fonts.mono,
           fontSize: 10,
-          color: enabled && count > 0 ? theme.textInactive : 'transparent',
+          color: enabled ? theme.textInactive : theme.textMuted,
           fontVariantNumeric: 'tabular-nums',
           minWidth: 14,
           textAlign: 'right',
         }}
       >
-        {count}
+        {enabled ? (count || '—') : 'off'}
       </span>
     </button>
   )
@@ -586,7 +617,9 @@ function ChannelRow({
   hidden: boolean
   onClick: () => void
 }) {
-  const { label, channel } = meta
+  const { label, channel, status } = meta
+  const isBroken = status === 'broken'
+  const opacity = hidden ? 0.35 : isBroken ? 0.7 : 1
   return (
     <button
       onClick={onClick}
@@ -598,25 +631,16 @@ function ChannelRow({
         display: 'flex',
         alignItems: 'center',
         gap: 8,
-        padding: '5px 0',
+        padding: '3px 4px 3px 20px',
         cursor: 'pointer',
         textAlign: 'left',
-        opacity: hidden ? 0.45 : 1,
-        transition: 'opacity 120ms, background 120ms',
         borderRadius: 4,
+        opacity,
+        transition: 'opacity 120ms, background 120ms',
       }}
       onMouseEnter={(e) => { e.currentTarget.style.background = theme.surface }}
       onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
     >
-      <span
-        style={{
-          width: 8, height: 8, borderRadius: '50%',
-          background: hidden ? 'transparent' : theme.accent,
-          border: `1.5px solid ${theme.accent}`,
-          boxSizing: 'border-box',
-          flexShrink: 0,
-        }}
-      />
       <span
         style={{
           fontFamily: fonts.mono,
@@ -625,21 +649,13 @@ function ChannelRow({
           letterSpacing: 0.4,
           minWidth: 26,
           fontVariantNumeric: 'tabular-nums',
+          textDecoration: hidden ? 'line-through' : 'none',
         }}
       >
         {label}
       </span>
-      <span
-        style={{
-          flex: 1,
-          fontSize: 11,
-          color: theme.textMuted,
-          fontFamily: fonts.mono,
-          letterSpacing: 0.3,
-        }}
-      >
-        {channel.kind}
-      </span>
+      <StatusPill broken={isBroken} />
+      <span style={{ flex: 1 }} />
       <span
         style={{
           fontSize: 10,
@@ -648,9 +664,29 @@ function ChannelRow({
           fontVariantNumeric: 'tabular-nums',
         }}
       >
-        {channel.touches} touches
+        {channel.touches}t
       </span>
     </button>
+  )
+}
+
+function StatusPill({ broken }: { broken: boolean }) {
+  return (
+    <span
+      style={{
+        fontFamily: fonts.mono,
+        fontSize: 9,
+        letterSpacing: 0.6,
+        padding: '1px 5px',
+        borderRadius: 3,
+        background: broken ? 'transparent' : theme.accent,
+        color: broken ? theme.textMuted : theme.panel,
+        border: broken ? `1px solid ${theme.textMuted}` : `1px solid ${theme.accent}`,
+        textTransform: 'uppercase',
+      }}
+    >
+      {broken ? 'broken' : 'live'}
+    </span>
   )
 }
 

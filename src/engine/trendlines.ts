@@ -26,6 +26,7 @@ export interface ChannelMeta {
   channel: Channel
   sig: string
   label: string
+  status: 'live' | 'broken'
 }
 
 export function channelSignature(c: Pick<Channel, 'kind' | 'startTime' | 'endTime'>): string {
@@ -116,7 +117,7 @@ export function withChannelMeta(channels: ReadonlyArray<Channel>): ChannelMeta[]
   let supCount = 0
   return channels.map((channel) => {
     const label = channel.kind === 'resistance' ? `R${++resCount}` : `S${++supCount}`
-    return { channel, sig: channelSignature(channel), label }
+    return { channel, sig: channelSignature(channel), label, status: 'live' }
   })
 }
 

@@ -102,13 +102,18 @@ export default function TradingResearchSandbox() {
   // are silently dropped — not frozen. Channels freeze only when their CURRENT
   // refined form has a confirmed break, so the replay end-state matches
   // single-shot detection on the full range.
-  type TrackedChannel = { meta: ChannelMeta; status: 'live' | 'frozen' }
-  const trackedChannelsRef = useRef<Map<string, TrackedChannel>>(new Map())
+  const trackedChannelsRef = useRef<Map<string, ChannelMeta>>(new Map())
   // (key → label/kind) snapshot from the prior render, for log diffing.
   const prevTrackedInfoRef = useRef<Map<string, { label: string; kind: 'resistance' | 'support' }>>(new Map())
-  // Persistent label counters: don't reuse numbers across the session even when
-  // channels drop/restore. Reset on TF / dataset / range change.
-  const labelCountersRef = useRef<{ R: number; S: number }>({ R: 0, S: 0 })
+  // Persistent identity → label registry. Outlives drops, freezes, backward
+  // scrubs, and kind-toggle-off cycles within a session. Cleared only on
+  // TF / dataset / range change. Without this, a channel that drops for even
+  // one tick re-enters with a fresh counter value — root cause of the
+  // S1→S2→…→S14 inflation loop on flapping channels.
+  const labelRegistryRef = useRef<{
+    counters: { R: number; S: number }
+    byIdentity: Map<string, string>
+  }>({ counters: { R: 0, S: 0 }, byIdentity: new Map() })
   // Sentinels for detecting TF/range change inside the channelsMeta memo.
   // Initial null/undefined means "not yet seen" — skip reset on first mount.
   const prevActiveRef = useRef<typeof active | null>(null)
@@ -148,7 +153,11 @@ export default function TradingResearchSandbox() {
   // across replay because it's just two booleans gating pickChannels.
   const [showResistance, setShowResistance] = useState(true)
   const [showSupport, setShowSupport] = useState(true)
-  const [hiddenChannelSigs, setHiddenChannelSigs] = useState<ReadonlySet<string>>(() => new Set())
+  // Per-channel hide set, keyed by stable label (R1/S4/…). Labels survive flap,
+  // freeze, backward scrub, and kind-toggle cycles thanks to the persistent
+  // label registry, so hides stick until the registry resets (TF/range/data
+  // change), at which point this set is cleared in lockstep below.
+  const [hiddenChannelLabels, setHiddenChannelLabels] = useState<ReadonlySet<string>>(() => new Set())
   const [drawnLines, setDrawnLines] = useState<DrawnLine[]>([])
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null)
   const [strategyEnabled, setStrategyEnabled] = useState(true)
@@ -615,7 +624,7 @@ export default function TradingResearchSandbox() {
       }
       trackedChannelsRef.current.clear()
       prevTrackedInfoRef.current = new Map()
-      labelCountersRef.current = { R: 0, S: 0 }
+      labelRegistryRef.current = { counters: { R: 0, S: 0 }, byIdentity: new Map() }
     }
     prevActiveRef.current = active
     prevAppliedRangeRef.current = appliedRange
@@ -633,22 +642,12 @@ export default function TradingResearchSandbox() {
     const midPrice = visibleCandles[Math.floor(visibleCandles.length / 2)].close
     const eps = midPrice * TOUCH_PCT
     const prev = trackedChannelsRef.current
-    const next = new Map<string, TrackedChannel>()
+    const next = new Map<string, ChannelMeta>()
+    const registry = labelRegistryRef.current
 
-    // Index prev by identity for label inheritance. Covers BOTH live and
-    // frozen entries, in-view and out-of-view. Prefer 'live' on collision
-    // (most recent state representation of that identity).
-    const prevByIdentity = new Map<string, TrackedChannel>()
-    for (const [, t] of prev) {
-      const id = `${t.meta.channel.kind}|${t.meta.channel.startTime}`
-      const existing = prevByIdentity.get(id)
-      if (!existing || (existing.status === 'frozen' && t.status === 'live')) {
-        prevByIdentity.set(id, t)
-      }
-    }
-
-    // Process raw channels — one entry per identity. The same identity in
-    // prev (live OR frozen) inherits its label; otherwise a fresh number.
+    // Process raw channels — one entry per identity. The registry preserves
+    // labels across drops/freezes/backward-scrubs/kind-toggles, so the same
+    // line never gets a different number within a session.
     const detectedIdentities = new Set<string>()
     for (const c of rawChannels) {
       const identity = `${c.kind}|${c.startTime}`
@@ -659,34 +658,43 @@ export default function TradingResearchSandbox() {
       const extended = extendChannelToTime(c, breakT ?? lastTime)
       const sig = channelSignature(c)
 
-      const prevSame = prevByIdentity.get(identity)
-      const label = prevSame
-        ? prevSame.meta.label
-        : c.kind === 'resistance'
-          ? `R${++labelCountersRef.current.R}`
-          : `S${++labelCountersRef.current.S}`
+      let label = registry.byIdentity.get(identity)
+      if (!label) {
+        label = c.kind === 'resistance'
+          ? `R${++registry.counters.R}`
+          : `S${++registry.counters.S}`
+        registry.byIdentity.set(identity, label)
+      }
 
-      const meta: ChannelMeta = { channel: extended, sig, label }
+      const meta: ChannelMeta = {
+        channel: extended,
+        sig,
+        label,
+        status: breakT !== null ? 'broken' : 'live',
+      }
       if (breakT !== null) {
-        next.set(`frozen|${identity}|${breakT}`, { meta, status: 'frozen' })
+        next.set(`frozen|${identity}|${breakT}`, meta)
       } else {
-        next.set(`live|${identity}`, { meta, status: 'live' })
+        next.set(`live|${identity}`, meta)
       }
     }
 
     // Carry over prev frozens whose identity wasn't re-detected AND whose
     // break is still in view. Re-detected ones were replaced above; out-of-
-    // view ones are silently dropped (backward scrub).
-    for (const [key, t] of prev) {
-      if (t.status !== 'frozen') continue
-      const identity = `${t.meta.channel.kind}|${t.meta.channel.startTime}`
+    // view ones are silently dropped (backward scrub). Carry runs for ALL
+    // kinds — when a kind is toggled off, its broken channels persist in
+    // tracked but are filtered at the render boundary; toggling back on
+    // restores them in place.
+    for (const [key, meta] of prev) {
+      if (meta.status !== 'broken') continue
+      const identity = `${meta.channel.kind}|${meta.channel.startTime}`
       if (detectedIdentities.has(identity)) continue
-      if ((t.meta.channel.endTime as number) > lastTime) continue
-      next.set(key, t)
+      if ((meta.channel.endTime as number) > lastTime) continue
+      next.set(key, meta)
     }
 
     trackedChannelsRef.current = next
-    return [...next.values()].map((t) => t.meta)
+    return [...next.values()]
   }, [drawSwings, trendlineEnabled, visibleCandles, showResistance, showSupport])
 
   // ---------- session.log: channel detect / freeze / drop / unfreeze ----------
@@ -700,18 +708,18 @@ export default function TradingResearchSandbox() {
     // Map identity → new frozen key, so a live-key removal can tell whether it
     // was a freeze (transition) or an actual drop (transient gone).
     const newFrozenByIdentity = new Map<string, string>()
-    for (const [key, t] of current) {
-      if (t.status !== 'frozen' || prevInfo.has(key)) continue
-      newFrozenByIdentity.set(`${t.meta.channel.kind}|${t.meta.channel.startTime}`, key)
+    for (const [key, meta] of current) {
+      if (meta.status !== 'broken' || prevInfo.has(key)) continue
+      newFrozenByIdentity.set(`${meta.channel.kind}|${meta.channel.startTime}`, key)
     }
 
-    for (const [key, t] of current) {
+    for (const [key, meta] of current) {
       if (prevInfo.has(key)) continue
-      const ch = t.meta.channel
-      if (t.status === 'frozen') {
+      const ch = meta.channel
+      if (meta.status === 'broken') {
         // eslint-disable-next-line no-console
         console.log(
-          `[channels] freeze label=${t.meta.label} kind=${ch.kind} break=${formatCrosshair(ch.endTime)} sig=${t.meta.sig}`,
+          `[channels] freeze label=${meta.label} kind=${ch.kind} break=${formatCrosshair(ch.endTime)} sig=${meta.sig}`,
         )
       } else {
         const dt = ch.endTime - ch.startTime
@@ -721,7 +729,7 @@ export default function TradingResearchSandbox() {
         const bY = ch.kind === 'resistance' ? ch.upperEnd : ch.lowerEnd
         // eslint-disable-next-line no-console
         console.log(
-          `[channels] detect label=${t.meta.label} kind=${ch.kind} touches=${ch.touches} anchors=${formatCrosshair(ch.startTime)}@${aY.toFixed(3)}/${formatCrosshair(ch.endTime)}@${bY.toFixed(3)} slope/h=${slopeH} sig=${t.meta.sig}`,
+          `[channels] detect label=${meta.label} kind=${ch.kind} touches=${ch.touches} anchors=${formatCrosshair(ch.startTime)}@${aY.toFixed(3)}/${formatCrosshair(ch.endTime)}@${bY.toFixed(3)} slope/h=${slopeH} sig=${meta.sig}`,
         )
       }
     }
@@ -742,8 +750,8 @@ export default function TradingResearchSandbox() {
     }
 
     const nextInfo = new Map<string, { label: string; kind: 'resistance' | 'support' }>()
-    for (const [key, t] of current) {
-      nextInfo.set(key, { label: t.meta.label, kind: t.meta.channel.kind })
+    for (const [key, meta] of current) {
+      nextInfo.set(key, { label: meta.label, kind: meta.channel.kind })
     }
     prevTrackedInfoRef.current = nextInfo
   }, [channelsMeta])
@@ -760,7 +768,10 @@ export default function TradingResearchSandbox() {
       pool[i].sup.setMarkers([])
     }
 
-    const visible = channelsMeta.filter((m) => !hiddenChannelSigs.has(m.sig))
+    const visible = channelsMeta.filter((m) => {
+      if (hiddenChannelLabels.has(m.label)) return false
+      return m.channel.kind === 'resistance' ? showResistance : showSupport
+    })
 
     while (pool.length < visible.length) {
       pool.push({
@@ -810,7 +821,7 @@ export default function TradingResearchSandbox() {
     }
 
     for (let i = visible.length; i < pool.length; i++) clearPoolSlot(i)
-  }, [channelsMeta, hiddenChannelSigs, chartsReady, colors])
+  }, [channelsMeta, showResistance, showSupport, hiddenChannelLabels, chartsReady, colors])
 
   // Mirror tool state into refs for the chart click handler.
   // Switching away from trendline mid-draw clears the pending anchor.
@@ -865,19 +876,26 @@ export default function TradingResearchSandbox() {
     }
   }, [themeMode])
 
-  const toggleChannelHidden = (sig: string) => {
-    setHiddenChannelSigs((prev) => {
-      const next = new Set(prev)
-      if (next.has(sig)) next.delete(sig)
-      else next.add(sig)
-      return next
-    })
-  }
-  const clearHiddenChannels = () => setHiddenChannelSigs(new Set())
   const toggleChannelKind = (kind: 'resistance' | 'support') => {
     if (kind === 'resistance') setShowResistance((v) => !v)
     else setShowSupport((v) => !v)
   }
+  const toggleChannelLabelHidden = (label: string) => {
+    setHiddenChannelLabels((prev) => {
+      const next = new Set(prev)
+      if (next.has(label)) next.delete(label)
+      else next.add(label)
+      return next
+    })
+  }
+  const clearHiddenChannelLabels = () => setHiddenChannelLabels(new Set())
+
+  // Clear hidden-labels set when the label registry resets (active dataset or
+  // applied range change). Otherwise a stale "S4" hide from the prior range
+  // would silently suppress a brand-new S4 in the next range.
+  useEffect(() => {
+    setHiddenChannelLabels(new Set())
+  }, [active, appliedRange])
 
   // ---------- keyboard: draw tool shortcuts ----------
   // V cursor · T trendline · H horizontal · S snap toggle
@@ -1176,12 +1194,12 @@ export default function TradingResearchSandbox() {
           onStartingBalanceChange={setStartingBalance}
           markPrice={markPrice}
           channelsMeta={channelsMeta}
-          hiddenChannelSigs={hiddenChannelSigs}
-          onToggleChannelHidden={toggleChannelHidden}
-          onClearHiddenChannels={clearHiddenChannels}
           showResistance={showResistance}
           showSupport={showSupport}
           onToggleChannelKind={toggleChannelKind}
+          hiddenChannelLabels={hiddenChannelLabels}
+          onToggleChannelLabelHidden={toggleChannelLabelHidden}
+          onClearHiddenChannelLabels={clearHiddenChannelLabels}
         />
       </div>
 
