@@ -40,8 +40,18 @@ export const CONFIRM_BREAK_BARS = 2
 
 /**
  * Time of the FIRST candle in the earliest run of `CONFIRM_BREAK_BARS`
- * consecutive closes outside either rail by more than `eps`, scanning bars
- * strictly after `c.endTime`. Returns null if no such confirmed run exists.
+ * consecutive closes that break the channel's DERIVED parallel rail by more
+ * than `eps`, scanning bars strictly after `c.endTime`. Returns null if no
+ * such confirmed run exists.
+ *
+ * Asymmetric freeze rule: only a break of the derived parallel rail (the
+ * inferred boundary opposite the touch-anchored line) counts as a freeze
+ * event. A break of the touch-anchored rail itself is the trend line being
+ * tested — pickChannels gets to refit on the next pass with the new pivot
+ * absorbed. Mapping:
+ *   - kind='support'    → touch-anchored at lower; freeze on UPPER break
+ *   - kind='resistance' → touch-anchored at upper; freeze on LOWER break
+ *
  * The channel is truncated to this first-break time (not the confirmation bar).
  */
 export function findChannelBreak(
@@ -53,15 +63,18 @@ export function findChannelBreak(
   if (dt <= 0) return null
   const slopeUpper = (c.upperEnd - c.upperStart) / dt
   const slopeLower = (c.lowerEnd - c.lowerStart) / dt
+  const freezeSide: 'upper' | 'lower' = c.kind === 'support' ? 'upper' : 'lower'
   let runStart: number | null = null
   let streak = 0
   for (let i = 0; i < candles.length; i++) {
     const t = candles[i].time as number
     if (t <= c.endTime) continue
-    const upperY = c.upperEnd + slopeUpper * (t - c.endTime)
-    const lowerY = c.lowerEnd + slopeLower * (t - c.endTime)
     const close = candles[i].close
-    if (close > upperY + eps || close < lowerY - eps) {
+    const breakHit =
+      freezeSide === 'upper'
+        ? close > c.upperEnd + slopeUpper * (t - c.endTime) + eps
+        : close < c.lowerEnd + slopeLower * (t - c.endTime) - eps
+    if (breakHit) {
       if (runStart === null) runStart = t
       streak++
       if (streak >= CONFIRM_BREAK_BARS) return runStart
