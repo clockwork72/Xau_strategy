@@ -53,9 +53,20 @@ function pnlOnClose(side: TradeSide, entry: number, exit: number, lotSize: numbe
 }
 
 /**
- * Treat consecutive opposite signals as one closed trade (entry → exit at
- * the next signal's price). The last unmatched signal becomes the open
- * position; its unrealized PnL marks to the provided markPrice.
+ * Pair signals into closed trades + an optional open trade.
+ *
+ * Two pairing models, chosen automatically per call:
+ *
+ *  - **Label-paired** (PAB-style, default when any signal carries a label):
+ *    Sells with `sl/tp` metadata are entries; buys with `reason` metadata are
+ *    exits. Entries pair with exits by `label`. Open trades are entries with
+ *    no matching exit. Orphan signals are dropped. This avoids the
+ *    "consecutive sells fabricate a fake long" phantom-trade bug.
+ *
+ *  - **Alternating-flip** (fallback when signals are unlabeled): each new
+ *    signal closes the previous open and opens a new position on the opposite
+ *    side. Preserved so the EMA-cross placeholder strategy still produces
+ *    sensible stats if someone swaps it back in.
  */
 export function computeStats(
   signals: ReadonlyArray<Signal>,
@@ -64,38 +75,73 @@ export function computeStats(
   markPrice: number | null,
 ): StrategyStats {
   const closedTrades: ClosedTrade[] = []
-  let open: OpenTrade | null = null
+  let openTrade: OpenTrade | null = null
 
-  for (const s of signals) {
-    const desired: TradeSide = s.side === 'buy' ? 'long' : 'short'
-    if (open) {
-      const rDistance = open.sl !== undefined ? Math.abs(open.sl - open.entryPrice) : undefined
-      const priceMove = open.side === 'short' ? open.entryPrice - s.price : s.price - open.entryPrice
-      const rMultiple = rDistance !== undefined && rDistance > 0 ? priceMove / rDistance : undefined
-      closedTrades.push({
-        side: open.side,
-        entryTime: open.entryTime,
-        entryPrice: open.entryPrice,
-        exitTime: s.time,
-        exitPrice: s.price,
-        pnl: pnlOnClose(open.side, open.entryPrice, s.price, lotSize),
-        label: open.label,
-        sl: open.sl,
-        tp: open.tp,
-        rMultiple,
-        reason: s.reason,
-        channelLabel: open.channelLabel,
-      })
+  const labeled = signals.some((s) => s.label !== undefined)
+
+  if (labeled) {
+    const entryByLabel = new Map<string, Signal>()
+    for (const s of signals) {
+      if (s.label === undefined) continue
+      if (s.side === 'sell' && s.sl !== undefined && s.tp !== undefined) {
+        entryByLabel.set(s.label, s)
+        continue
+      }
+      if (s.side === 'buy') {
+        const entry = entryByLabel.get(s.label)
+        if (!entry || entry.sl === undefined) continue
+        const side: TradeSide = 'short'
+        const rDistance = Math.abs(entry.sl - entry.price)
+        const rMultiple = rDistance > 0 ? (entry.price - s.price) / rDistance : undefined
+        closedTrades.push({
+          side,
+          entryTime: entry.time,
+          entryPrice: entry.price,
+          exitTime: s.time,
+          exitPrice: s.price,
+          pnl: pnlOnClose(side, entry.price, s.price, lotSize),
+          label: s.label,
+          sl: entry.sl,
+          tp: entry.tp,
+          rMultiple,
+          reason: s.reason,
+          channelLabel: entry.channelLabel,
+        })
+        entryByLabel.delete(s.label)
+      }
     }
-    open = {
-      side: desired,
-      entryTime: s.time,
-      entryPrice: s.price,
-      label: s.label,
-      sl: s.sl,
-      tp: s.tp,
-      channelLabel: s.channelLabel,
+    // Anything left in the map = still open. PAB only ever holds one at a
+    // time; if more than one ever shows up here it means the strategy
+    // emitted overlapping entries (a bug) — we still surface the most-
+    // recent one as the open trade for consistency.
+    for (const entry of entryByLabel.values()) {
+      openTrade = {
+        side: 'short',
+        entryTime: entry.time,
+        entryPrice: entry.price,
+        label: entry.label,
+        sl: entry.sl,
+        tp: entry.tp,
+        channelLabel: entry.channelLabel,
+      }
     }
+  } else {
+    let open: OpenTrade | null = null
+    for (const s of signals) {
+      const desired: TradeSide = s.side === 'buy' ? 'long' : 'short'
+      if (open) {
+        closedTrades.push({
+          side: open.side,
+          entryTime: open.entryTime,
+          entryPrice: open.entryPrice,
+          exitTime: s.time,
+          exitPrice: s.price,
+          pnl: pnlOnClose(open.side, open.entryPrice, s.price, lotSize),
+        })
+      }
+      open = { side: desired, entryTime: s.time, entryPrice: s.price }
+    }
+    openTrade = open
   }
 
   let realizedPnl = 0
@@ -115,8 +161,8 @@ export function computeStats(
   }
 
   let unrealizedPnl = 0
-  if (open && markPrice !== null) {
-    unrealizedPnl = pnlOnClose(open.side, open.entryPrice, markPrice, lotSize)
+  if (openTrade && markPrice !== null) {
+    unrealizedPnl = pnlOnClose(openTrade.side, openTrade.entryPrice, markPrice, lotSize)
   }
 
   const totalTrades = closedTrades.length
@@ -127,7 +173,7 @@ export function computeStats(
 
   return {
     closedTrades,
-    openTrade: open,
+    openTrade,
     realizedPnl,
     unrealizedPnl,
     totalTrades,
