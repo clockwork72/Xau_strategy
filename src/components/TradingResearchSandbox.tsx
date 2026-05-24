@@ -1032,10 +1032,24 @@ export default function TradingResearchSandbox() {
     }
   }, [drawnLines, selectedLineId, chartsReady])
 
+  // EMA(21) lookup map for the strategy. Independent of the chart overlay's
+  // user-configurable emaLength so the strategy stays deterministic when the
+  // user changes the displayed EMA length.
+  const ema21ByTime = useMemo(() => {
+    const map = new Map<number, number>()
+    for (const p of computeEma(visibleCandles, 21)) map.set(p.time as number, p.value)
+    return map
+  }, [visibleCandles])
+
+  const liveSupportChannels = useMemo(
+    () => channelsMeta.filter((m) => m.status === 'live' && m.channel.kind === 'support'),
+    [channelsMeta],
+  )
+
   // ---------- Strategy signals (computed on the visible slice only) ----------
   const signals = useMemo(
-    () => (strategyEnabled ? runPriceActionBeta(visibleCandles) : []),
-    [visibleCandles, strategyEnabled],
+    () => (strategyEnabled ? runPriceActionBeta(visibleCandles, liveSupportChannels, ema21ByTime) : []),
+    [visibleCandles, strategyEnabled, liveSupportChannels, ema21ByTime],
   )
 
   // ---------- Strategy stats (winrate, PnL, equity, open position) ----------
