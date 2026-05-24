@@ -38,7 +38,12 @@ import {
   type DrawTool,
   type DrawnLine,
 } from '../engine/drawing'
-import { formatAxisTick, formatCrosshair, parseCasaLocalToUtcSec } from '../util/time'
+import {
+  casaSessionStartAtOrBefore,
+  formatAxisTick,
+  formatCrosshair,
+  parseCasaLocalToUtcSec,
+} from '../util/time'
 import { useReplayController } from '../hooks/useReplayController'
 import { useDatasets } from '../hooks/useDatasets'
 import { useThemeSync } from '../hooks/useThemeSync'
@@ -199,6 +204,26 @@ export default function TradingResearchSandbox() {
     setReplaySpeed,
     visibleCandlesRef,
   } = useReplayController(active, appliedRange)
+
+  // ---------- algorithm window (session-anchored, range-independent) ----------
+  // Channel detection, EMA(21) and strategy all read from algoCandles instead
+  // of the range-restricted visibleCandles. Window: [most recent 22:00 Casa,
+  // playhead]. Pulled from the FULL dataset, so loading 1-day vs 3-day with
+  // the same playhead always feeds the algorithm the same bars → same
+  // channels → same trades. No look-ahead — all bars satisfy time ≤ playhead.
+  const algoCandles = useMemo<Candle[]>(() => {
+    if (replayPlayheadTime === null || active.candles.length === 0) return []
+    const lo = casaSessionStartAtOrBefore(replayPlayheadTime)
+    const hi = replayPlayheadTime
+    const out: Candle[] = []
+    for (const c of active.candles) {
+      const t = c.time as number
+      if (t < lo) continue
+      if (t > hi) break
+      out.push(c)
+    }
+    return out
+  }, [active.candles, replayPlayheadTime])
 
   // ---------- lookup map for hover → candle ----------
   const candleByTime = useMemo(() => {
@@ -613,13 +638,20 @@ export default function TradingResearchSandbox() {
     lastEmaSettingsRef.current = { length: emaLength, enabled: true }
   }, [visibleCandles, emaLength, emaEnabled, chartsReady])
 
-  // Swings always computed (independent of the trendline overlay toggle) so
-  // both the draw-tool snap and the channel detector can read them.
+  // Swings for the DRAW TOOL — derived from visibleCandles so snap targets
+  // the pivots actually rendered on the chart.
   const drawSwings = useMemo(() => ({
     highs: findSwingHighs(visibleCandles, TRENDLINE_LOOKBACK),
     lows: findSwingLows(visibleCandles, TRENDLINE_LOOKBACK),
   }), [visibleCandles])
   useEffect(() => { swingsRef.current = drawSwings }, [drawSwings])
+
+  // Swings for CHANNEL DETECTION — derived from algoCandles (session-anchored)
+  // so the channel set at any playhead is range-independent.
+  const algoSwings = useMemo(() => ({
+    highs: findSwingHighs(algoCandles, TRENDLINE_LOOKBACK),
+    lows: findSwingLows(algoCandles, TRENDLINE_LOOKBACK),
+  }), [algoCandles])
 
   // ---------- Trendline channels: touch-scored across all pivot pairs.
   // pickChannels returns distinct non-overlapping channels with ≥3 touches.
@@ -646,17 +678,19 @@ export default function TradingResearchSandbox() {
     prevActiveRef.current = active
     prevAppliedRangeRef.current = appliedRange
 
-    if (!trendlineEnabled || visibleCandles.length === 0) return []
+    if (!trendlineEnabled || algoCandles.length === 0) return []
+    // Channel detection runs on algoCandles (session-anchored, full dataset)
+    // — same playhead always sees the same swings regardless of loaded range.
     const rawChannels = [
-      ...(showResistance ? pickChannels(drawSwings.highs, visibleCandles, 'resistance') : []),
-      ...(showSupport ? pickChannels(drawSwings.lows, visibleCandles, 'support') : []),
+      ...(showResistance ? pickChannels(algoSwings.highs, algoCandles, 'resistance') : []),
+      ...(showSupport ? pickChannels(algoSwings.lows, algoCandles, 'support') : []),
     ]
     // ---- DISABLED: cross-kind non-overlap (keeps broader, drops smaller) ----
     // Re-enable by sorting all candidates by (endTime - startTime) desc and
     // dropping any that overlaps an already-accepted one in time.
     // ---- /DISABLED ----
-    const lastTime = visibleCandles[visibleCandles.length - 1].time as number
-    const midPrice = visibleCandles[Math.floor(visibleCandles.length / 2)].close
+    const lastTime = algoCandles[algoCandles.length - 1].time as number
+    const midPrice = algoCandles[Math.floor(algoCandles.length / 2)].close
     const eps = midPrice * TOUCH_PCT
     const prev = trackedChannelsRef.current
     const next = new Map<string, ChannelMeta>()
@@ -687,7 +721,7 @@ export default function TradingResearchSandbox() {
       // over loop below moves the frozen entry into next unchanged.
       if (prevFrozenByIdentity.has(identity)) continue
 
-      const breakT = findChannelBreak(c, visibleCandles, eps)
+      const breakT = findChannelBreak(c, algoCandles, eps)
       const extended = extendChannelToTime(c, breakT ?? lastTime)
       const sig = channelSignature(c)
 
@@ -724,7 +758,7 @@ export default function TradingResearchSandbox() {
 
     trackedChannelsRef.current = next
     return [...next.values()]
-  }, [drawSwings, trendlineEnabled, visibleCandles, showResistance, showSupport])
+  }, [algoSwings, trendlineEnabled, algoCandles, showResistance, showSupport])
 
   // ---------- session.log: channel detect / freeze / drop / unfreeze ----------
   // Diffs tracked entries by KEY (not sig) so refinements within the same
@@ -1049,14 +1083,13 @@ export default function TradingResearchSandbox() {
     }
   }, [drawnLines, selectedLineId, chartsReady])
 
-  // EMA(21) lookup map for the strategy. Independent of the chart overlay's
-  // user-configurable emaLength so the strategy stays deterministic when the
-  // user changes the displayed EMA length.
+  // EMA(21) lookup for the strategy. Computed on algoCandles so the EMA
+  // value at any playhead time is identical regardless of loaded range.
   const ema21ByTime = useMemo(() => {
     const map = new Map<number, number>()
-    for (const p of computeEma(visibleCandles, 21)) map.set(p.time as number, p.value)
+    for (const p of computeEma(algoCandles, 21)) map.set(p.time as number, p.value)
     return map
-  }, [visibleCandles])
+  }, [algoCandles])
 
   const liveSupportChannels = useMemo(
     () => channelsMeta.filter((m) => m.status === 'live' && m.channel.kind === 'support'),
@@ -1074,15 +1107,17 @@ export default function TradingResearchSandbox() {
       pabSettingsKeyRef.current = settingsKey
     }
     if (!strategyEnabled) return []
+    // Strategy gets algoCandles (session-anchored) so trades are deterministic
+    // per playhead regardless of loaded range.
     const newState = runPriceActionBeta(
-      visibleCandles,
+      algoCandles,
       liveSupportChannels,
       ema21ByTime,
       pabStateRef.current,
     )
     pabStateRef.current = newState
     return newState.signals
-  }, [visibleCandles, strategyEnabled, liveSupportChannels, ema21ByTime, timeframe, appliedRange])
+  }, [algoCandles, strategyEnabled, liveSupportChannels, ema21ByTime, timeframe, appliedRange])
 
   // ---------- Strategy stats (winrate, PnL, equity, open position) ----------
   const markPrice = visibleCandles.length > 0 ? visibleCandles[visibleCandles.length - 1].close : null

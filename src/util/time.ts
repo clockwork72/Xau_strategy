@@ -95,6 +95,26 @@ function casaOffsetMinutesAt(utcMs: number): number {
   return Math.round((casaAsIfUtc - utcMs) / 60000)
 }
 
+// Trading-session anchor: 22:00 Casablanca local = NY 17:00 (close) /
+// Asia open boundary on the FX day clock. The algorithm "session day" runs
+// from one 22:00 Casa to the next, so channel/EMA/strategy state resets
+// at this fixed Casa hour regardless of what range the user loaded.
+const SESSION_ANCHOR_HOUR_CASA = 22
+
+/** UTC epoch seconds of the most recent 22:00 Casablanca-local time at or
+ *  before `tSec`. DST-safe via the same Casa-offset helper as
+ *  parseCasaLocalToUtcSec. */
+export function casaSessionStartAtOrBefore(tSec: number): number {
+  const offMin = casaOffsetMinutesAt(tSec * 1000)
+  // Seconds since midnight in Casa local for the given instant.
+  const casaSecOfDay = (((tSec + offMin * 60) % 86400) + 86400) % 86400
+  const anchorSec = SESSION_ANCHOR_HOUR_CASA * 3600
+  const backoff = casaSecOfDay >= anchorSec
+    ? casaSecOfDay - anchorSec
+    : casaSecOfDay + (86400 - anchorSec)
+  return tSec - backoff
+}
+
 /** Parse a Casablanca-local "YYYY-MM-DD HH:MM" (or "YYYY-MM-DDTHH:MM") string to UTC epoch seconds.
  *  Returns null on malformed input. DST-safe via two-pass offset reconciliation. */
 export function parseCasaLocalToUtcSec(s: string): number | null {
