@@ -74,10 +74,15 @@ export default function TradingResearchSandbox() {
   const cvdSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const cvdZeroLineRef = useRef<IPriceLine | null>(null)
   const emaSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
-  // SL/TP horizontal price lines for the currently-open strategy trade.
-  // Created on open, removed on close. Re-created on theme/strategy changes.
-  const tradeSlLineRef = useRef<IPriceLine | null>(null)
-  const tradeTpLineRef = useRef<IPriceLine | null>(null)
+  // Per-trade chart overlays (MetaTrader-style): each trade gets 3 line
+  // series — a connector from entry→exit, an SL segment, and a TP segment.
+  // Segments span only the trade's duration (entry time → exit time, or
+  // entry time → current playhead for the open trade). Pool grows on demand.
+  const tradeVizPoolRef = useRef<Array<{
+    connector: ISeriesApi<'Line'>
+    sl: ISeriesApi<'Line'>
+    tp: ISeriesApi<'Line'>
+  }>>([])
   // Pool of LineSeries pairs (resistance + support) — grows on demand,
   // one pair per detected channel. History entries get a faded color.
   const channelsSeriesPoolRef = useRef<Array<{
@@ -1120,37 +1125,133 @@ export default function TradingResearchSandbox() {
     cs.setMarkers(markers)
   }, [signals, chartsReady, themeMode])
 
-  // ---------- SL/TP horizontal price lines on the open strategy trade ----------
+  // ---------- MT-style per-trade chart overlays ----------
+  // For every closed trade and the live open trade we draw three short
+  // line-segment series on the price chart:
+  //   - connector  entry→exit (green if profit, red if loss)
+  //   - SL segment entry→exit at the stop price (red dashed)
+  //   - TP segment entry→exit at the target price (green dashed)
+  // The open trade's segments extend from entry to the current playhead bar
+  // and update each tick. A small ref-held pool of LineSeries is reused
+  // across renders so we don't churn chart objects.
   useEffect(() => {
-    const cs = candleSeriesRef.current
-    if (!cs) return
-    if (tradeSlLineRef.current) {
-      cs.removePriceLine(tradeSlLineRef.current)
-      tradeSlLineRef.current = null
+    const chart = priceChartRef.current
+    if (!chart) return
+
+    interface VizItem {
+      entryTime: number
+      entryPrice: number
+      exitTime: number
+      exitPrice: number
+      sl: number
+      tp: number
+      isWin: boolean
     }
-    if (tradeTpLineRef.current) {
-      cs.removePriceLine(tradeTpLineRef.current)
-      tradeTpLineRef.current = null
+    const items: VizItem[] = []
+    for (const t of strategyStats.closedTrades) {
+      if (t.sl === undefined || t.tp === undefined) continue
+      items.push({
+        entryTime: t.entryTime as number,
+        entryPrice: t.entryPrice,
+        exitTime: t.exitTime as number,
+        exitPrice: t.exitPrice,
+        sl: t.sl,
+        tp: t.tp,
+        isWin: t.pnl > 0,
+      })
     }
     const open = strategyStats.openTrade
-    if (!open || open.sl === undefined || open.tp === undefined) return
-    tradeSlLineRef.current = cs.createPriceLine({
-      price: open.sl,
-      color: colors.down,
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      axisLabelVisible: true,
-      title: `SL ${open.label ?? ''}`.trim(),
-    })
-    tradeTpLineRef.current = cs.createPriceLine({
-      price: open.tp,
-      color: colors.up,
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      axisLabelVisible: true,
-      title: `TP ${open.label ?? ''}`.trim(),
-    })
-  }, [strategyStats.openTrade, chartsReady, themeMode])
+    const lastBarTime = visibleCandles.length > 0
+      ? (visibleCandles[visibleCandles.length - 1].time as number)
+      : null
+    if (
+      open
+      && open.sl !== undefined
+      && open.tp !== undefined
+      && markPrice !== null
+      && lastBarTime !== null
+      && lastBarTime > (open.entryTime as number)
+    ) {
+      // Short: in profit when current price < entry.
+      const isWin = open.side === 'short' ? markPrice < open.entryPrice : markPrice > open.entryPrice
+      items.push({
+        entryTime: open.entryTime as number,
+        entryPrice: open.entryPrice,
+        exitTime: lastBarTime,
+        exitPrice: markPrice,
+        sl: open.sl,
+        tp: open.tp,
+        isWin,
+      })
+    }
+
+    // Grow pool if needed.
+    while (tradeVizPoolRef.current.length < items.length) {
+      tradeVizPoolRef.current.push({
+        connector: chart.addLineSeries({
+          color: colors.up,
+          lineWidth: 1,
+          lineStyle: LineStyle.Solid,
+          lastValueVisible: false,
+          priceLineVisible: false,
+          crosshairMarkerVisible: false,
+        }),
+        sl: chart.addLineSeries({
+          color: colors.down,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          lastValueVisible: false,
+          priceLineVisible: false,
+          crosshairMarkerVisible: false,
+        }),
+        tp: chart.addLineSeries({
+          color: colors.up,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          lastValueVisible: false,
+          priceLineVisible: false,
+          crosshairMarkerVisible: false,
+        }),
+      })
+    }
+
+    // Bind data per item, recolor connector by outcome each tick.
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      const slot = tradeVizPoolRef.current[i]
+      slot.connector.applyOptions({ color: item.isWin ? colors.up : colors.down })
+      slot.connector.setData([
+        { time: item.entryTime as Time, value: item.entryPrice },
+        { time: item.exitTime as Time, value: item.exitPrice },
+      ])
+      slot.sl.applyOptions({ color: colors.down })
+      slot.sl.setData([
+        { time: item.entryTime as Time, value: item.sl },
+        { time: item.exitTime as Time, value: item.sl },
+      ])
+      slot.tp.applyOptions({ color: colors.up })
+      slot.tp.setData([
+        { time: item.entryTime as Time, value: item.tp },
+        { time: item.exitTime as Time, value: item.tp },
+      ])
+    }
+
+    // Clear any leftover pool slots beyond the current item count.
+    for (let i = items.length; i < tradeVizPoolRef.current.length; i++) {
+      const slot = tradeVizPoolRef.current[i]
+      slot.connector.setData([])
+      slot.sl.setData([])
+      slot.tp.setData([])
+    }
+  }, [
+    strategyStats.closedTrades,
+    strategyStats.openTrade,
+    visibleCandles,
+    markPrice,
+    chartsReady,
+    themeMode,
+    colors,
+  ])
 
   // ---------- re-apply pinned range after timeframe / dataset switch ----------
   useEffect(() => {
