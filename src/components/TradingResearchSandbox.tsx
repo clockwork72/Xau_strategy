@@ -645,6 +645,18 @@ export default function TradingResearchSandbox() {
     const next = new Map<string, ChannelMeta>()
     const registry = labelRegistryRef.current
 
+    // Index prev frozens by identity. Once a channel has frozen, that break
+    // is canonical for the session: subsequent refinement passes that would
+    // find a different slope absorbing the breakout candles get SKIPPED,
+    // not allowed to un-freeze. CONFIRM_BREAK_BARS=2 already filters single
+    // bar wobbles, so a recorded break is solid evidence and stays put.
+    const prevFrozenByIdentity = new Map<string, { key: string; meta: ChannelMeta }>()
+    for (const [key, meta] of prev) {
+      if (meta.status !== 'broken') continue
+      const id = `${meta.channel.kind}|${meta.channel.startTime}`
+      prevFrozenByIdentity.set(id, { key, meta })
+    }
+
     // Process raw channels — one entry per identity. The registry preserves
     // labels across drops/freezes/backward-scrubs/kind-toggles, so the same
     // line never gets a different number within a session.
@@ -653,6 +665,10 @@ export default function TradingResearchSandbox() {
       const identity = `${c.kind}|${c.startTime}`
       if (detectedIdentities.has(identity)) continue
       detectedIdentities.add(identity)
+
+      // If this identity is already frozen in prev, preserve it. The carry-
+      // over loop below moves the frozen entry into next unchanged.
+      if (prevFrozenByIdentity.has(identity)) continue
 
       const breakT = findChannelBreak(c, visibleCandles, eps)
       const extended = extendChannelToTime(c, breakT ?? lastTime)
@@ -679,16 +695,12 @@ export default function TradingResearchSandbox() {
       }
     }
 
-    // Carry over prev frozens whose identity wasn't re-detected AND whose
-    // break is still in view. Re-detected ones were replaced above; out-of-
-    // view ones are silently dropped (backward scrub). Carry runs for ALL
-    // kinds — when a kind is toggled off, its broken channels persist in
-    // tracked but are filtered at the render boundary; toggling back on
-    // restores them in place.
+    // Carry over prev frozens whose break is still in view. Drop frozens
+    // whose endTime is past current playhead (backward-scrubbed past the
+    // break — channel returns to undetected state). Carry runs for ALL
+    // kinds — kind toggle filters at render boundary, not here.
     for (const [key, meta] of prev) {
       if (meta.status !== 'broken') continue
-      const identity = `${meta.channel.kind}|${meta.channel.startTime}`
-      if (detectedIdentities.has(identity)) continue
       if ((meta.channel.endTime as number) > lastTime) continue
       next.set(key, meta)
     }
