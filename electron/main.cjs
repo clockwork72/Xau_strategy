@@ -6,7 +6,7 @@ const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production'
 const DEV_URL = process.env.VITE_DEV_URL || 'http://localhost:5173'
 
 // Bridge for the agent: capture renderer console.log lines prefixed with
-// [draw] or [replay] into a fresh file on every session start.
+// [draw], [replay], [channels], or [strategy] into a fresh file on every session start.
 const LOG_PATH = path.join(__dirname, '..', 'session.log')
 function clearLog() {
   try { fs.writeFileSync(LOG_PATH, '') } catch (_) { /* ignore */ }
@@ -86,7 +86,8 @@ function createWindow() {
     if (
       message.startsWith('[draw]') ||
       message.startsWith('[replay]') ||
-      message.startsWith('[channels]')
+      message.startsWith('[channels]') ||
+      message.startsWith('[strategy]')
     ) {
       appendLog(`[${new Date().toISOString()}] ${message}`)
     }
