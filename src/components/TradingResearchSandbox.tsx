@@ -17,7 +17,8 @@ import {
 import { theme, fonts, sizes, palettes } from '../theme'
 import type { Candle, Timeframe } from '../types'
 import { computeEma } from '../engine/indicators'
-import { runPriceActionBeta } from '../engine/priceActionBeta'
+import { runPriceActionBeta, PAB_INITIAL_STATE, type PABState } from '../engine/priceActionBeta'
+import type { Signal } from '../engine/strategy'
 import { computeStats } from '../engine/portfolio'
 import { findSwingHighs, findSwingLows, type SwingPoint } from '../engine/swings'
 import {
@@ -118,6 +119,13 @@ export default function TradingResearchSandbox() {
   // Initial null/undefined means "not yet seen" — skip reset on first mount.
   const prevActiveRef = useRef<typeof active | null>(null)
   const prevAppliedRangeRef = useRef<typeof appliedRange | undefined>(undefined)
+
+  // Strategy state carried across replay ticks (no look-ahead — entries fire
+  // only at the playhead bar; this ref preserves the open trade + signal
+  // history). Reset on TF/range/dataset/strategy-toggle change inside the
+  // signals memo, same pattern as the channels tracker.
+  const pabStateRef = useRef<PABState>(PAB_INITIAL_STATE)
+  const pabSettingsKeyRef = useRef<string>('')
 
   // ---------- incremental-render bookkeeping ----------
   // Track last-rendered length + end time per series so we can call
@@ -1046,11 +1054,26 @@ export default function TradingResearchSandbox() {
     [channelsMeta],
   )
 
-  // ---------- Strategy signals (computed on the visible slice only) ----------
-  const signals = useMemo(
-    () => (strategyEnabled ? runPriceActionBeta(visibleCandles, liveSupportChannels, ema21ByTime) : []),
-    [visibleCandles, strategyEnabled, liveSupportChannels, ema21ByTime],
-  )
+  // ---------- Strategy signals (stateful, no look-ahead) ----------
+  // Reset triggers (TF/dataset, range, strategy-toggle) mirror the channels
+  // tracker. Mutating a ref inside useMemo is the project's established
+  // pattern for cross-render state — see the channelsMeta tracker above.
+  const signals = useMemo<Signal[]>(() => {
+    const settingsKey = `${timeframe}|${appliedRange?.from ?? 'na'}|${appliedRange?.to ?? 'na'}|${strategyEnabled ? 'on' : 'off'}`
+    if (settingsKey !== pabSettingsKeyRef.current) {
+      pabStateRef.current = PAB_INITIAL_STATE
+      pabSettingsKeyRef.current = settingsKey
+    }
+    if (!strategyEnabled) return []
+    const newState = runPriceActionBeta(
+      visibleCandles,
+      liveSupportChannels,
+      ema21ByTime,
+      pabStateRef.current,
+    )
+    pabStateRef.current = newState
+    return newState.signals
+  }, [visibleCandles, strategyEnabled, liveSupportChannels, ema21ByTime, timeframe, appliedRange])
 
   // ---------- Strategy stats (winrate, PnL, equity, open position) ----------
   const markPrice = visibleCandles.length > 0 ? visibleCandles[visibleCandles.length - 1].close : null
