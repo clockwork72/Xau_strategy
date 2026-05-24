@@ -21,7 +21,9 @@ For the playhead bar and each live `kind='support'` channel `c`, all four must h
 1. **Bar in channel's active range** — `c.startTime ≤ playhead.time`, and the channel is extended forward to `playhead.time` via `extendChannelToTime(c, playhead.time)`. Frozen/broken channels are excluded by the caller.
 2. **Proximity to top rail** — `|playhead.close − upper_rail_at(c, playhead.time)| ≤ midPrice * TOUCH_PCT`, where `TOUCH_PCT = 0.0006` (reused from `trendlines.ts`, ≈$2.70 on $4500 gold).
 3. **Above EMA(21)** — `playhead.close > ema21(playhead.time)`.
-4. **Upper-wick rejection** — `playhead.high − max(playhead.open, playhead.close) > |playhead.close − playhead.open|`. Strict greater-than. Color-agnostic (green or red qualifies).
+4. **Upper-wick rejection (non-doji)** — both must hold:
+   - `body / range ≥ MIN_BODY_TO_RANGE` (default `0.15`) — rejects dojis and spinning-tops whose body is too small for the "upper wick > body" check to be meaningful.
+   - `playhead.high − max(playhead.open, playhead.close) > |playhead.close − playhead.open|` — upper wick strictly larger than the body. Color-agnostic (green or red qualifies).
 
 If all four hold AND we are currently flat → open short at `playhead.close`.
 
@@ -113,6 +115,7 @@ const STOP_BUFFER_PCT = 0.0002
 const RR = 3
 const PROXIMITY_PCT = TOUCH_PCT  // 0.0006, imported from trendlines.ts
 const EMA_LENGTH = 21
+const MIN_BODY_TO_RANGE = 0.15   // exclude doji entry candles
 ```
 
 ---

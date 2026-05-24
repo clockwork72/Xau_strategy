@@ -4,6 +4,12 @@ import { TOUCH_PCT, extendChannelToTime, type ChannelMeta } from './trendlines'
 
 const STOP_BUFFER_PCT = 0.0002
 const RR = 3
+// Minimum body share of the candle's total range. Excludes dojis and
+// spinning-tops where `upper_wick > body` is satisfied trivially because
+// the body itself is tiny (e.g. the M5 10:25 / 16:50 candles user flagged).
+// A classic shooting-star rejection still passes — its body sits ~20-40%
+// of the range with the upper wick taking the rest.
+const MIN_BODY_TO_RANGE = 0.15
 
 interface OpenShort {
   entryTime: number
@@ -29,7 +35,10 @@ export const PAB_INITIAL_STATE: PABState = {
 }
 
 function isUpperWickRejection(c: Candle): boolean {
+  const range = c.high - c.low
+  if (range <= 0) return false
   const body = Math.abs(c.close - c.open)
+  if (body / range < MIN_BODY_TO_RANGE) return false // doji-ish, skip
   const upperWick = c.high - Math.max(c.open, c.close)
   return upperWick > body
 }
