@@ -61,11 +61,11 @@ The strategy is **stateful across replay ticks**, with state held in a sandbox-o
 ```ts
 interface PABState {
   signals: Signal[]
-  open: OpenShort | null
-  tradeCount: number
   lastProcessedTime: number  // -1 = never
 }
 ```
+
+**Signals are the single source of truth.** The current open trade and the running `tradeCount` are derived fresh from `signals` on every call — never stored separately. This means pruning signals on backward scrub automatically cleans up both derived values, so PAB-N labels reset correctly and there can be no dangling-entry / phantom-trade desyncs.
 
 **Pure function signature** — given `prevState`, produces `nextState`:
 
