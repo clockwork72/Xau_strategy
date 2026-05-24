@@ -14,12 +14,23 @@ export interface ClosedTrade {
   exitTime: UTCTimestamp
   exitPrice: number
   pnl: number
+  // PAB enrichments — set when the entry Signal carried them:
+  label?: string
+  sl?: number
+  tp?: number
+  rMultiple?: number
+  reason?: 'stop' | 'target'
+  channelLabel?: string
 }
 
 export interface OpenTrade {
   side: TradeSide
   entryTime: UTCTimestamp
   entryPrice: number
+  label?: string
+  sl?: number
+  tp?: number
+  channelLabel?: string
 }
 
 export interface StrategyStats {
@@ -58,6 +69,9 @@ export function computeStats(
   for (const s of signals) {
     const desired: TradeSide = s.side === 'buy' ? 'long' : 'short'
     if (open) {
+      const rDistance = open.sl !== undefined ? Math.abs(open.sl - open.entryPrice) : undefined
+      const priceMove = open.side === 'short' ? open.entryPrice - s.price : s.price - open.entryPrice
+      const rMultiple = rDistance !== undefined && rDistance > 0 ? priceMove / rDistance : undefined
       closedTrades.push({
         side: open.side,
         entryTime: open.entryTime,
@@ -65,9 +79,23 @@ export function computeStats(
         exitTime: s.time,
         exitPrice: s.price,
         pnl: pnlOnClose(open.side, open.entryPrice, s.price, lotSize),
+        label: open.label,
+        sl: open.sl,
+        tp: open.tp,
+        rMultiple,
+        reason: s.reason,
+        channelLabel: open.channelLabel,
       })
     }
-    open = { side: desired, entryTime: s.time, entryPrice: s.price }
+    open = {
+      side: desired,
+      entryTime: s.time,
+      entryPrice: s.price,
+      label: s.label,
+      sl: s.sl,
+      tp: s.tp,
+      channelLabel: s.channelLabel,
+    }
   }
 
   let realizedPnl = 0

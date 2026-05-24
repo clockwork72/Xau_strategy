@@ -9,6 +9,12 @@ export interface Signal {
   side: SignalSide
   price: number
   label?: string
+  // Optional PAB entry metadata (set on the opening signal):
+  sl?: number
+  tp?: number
+  channelLabel?: string
+  // Optional PAB exit metadata (set on the closing signal):
+  reason?: 'stop' | 'target'
 }
 
 // Pure: same candles in → same signals out. Replace the body when iterating

@@ -97,7 +97,7 @@ export function runPriceActionBeta(
       if (t <= scanFromTime) continue
       if (t > playheadTime) break
       if (bar.high >= open.sl) {
-        newSignals.push({ time: bar.time, side: 'buy', price: open.sl, label: open.label })
+        newSignals.push({ time: bar.time, side: 'buy', price: open.sl, label: open.label, reason: 'stop' })
         console.log(
           `[strategy] exit label=${open.label} reason=stop price=${open.sl.toFixed(2)} at=${t}`,
         )
@@ -105,7 +105,7 @@ export function runPriceActionBeta(
         break
       }
       if (bar.low <= open.tp) {
-        newSignals.push({ time: bar.time, side: 'buy', price: open.tp, label: open.label })
+        newSignals.push({ time: bar.time, side: 'buy', price: open.tp, label: open.label, reason: 'target' })
         console.log(
           `[strategy] exit label=${open.label} reason=target price=${open.tp.toFixed(2)} at=${t}`,
         )
@@ -133,7 +133,7 @@ export function runPriceActionBeta(
         const r = sl - bar.close
         const tp = bar.close - RR * r
 
-        newSignals.push({ time: bar.time, side: 'sell', price: bar.close, label })
+        newSignals.push({ time: bar.time, side: 'sell', price: bar.close, label, sl, tp, channelLabel: meta.label })
         console.log(
           `[strategy] entry label=${label} ch=${meta.label} close=${bar.close.toFixed(2)} rail=${rail.toFixed(2)} ema=${ema.toFixed(2)} SL=${sl.toFixed(2)} TP=${tp.toFixed(2)} R=${r.toFixed(2)}`,
         )

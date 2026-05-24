@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { theme, fonts, sizes } from '../theme'
 import type { Candle, Timeframe } from '../types'
-import type { StrategyStats } from '../engine/portfolio'
+import type { ClosedTrade, StrategyStats } from '../engine/portfolio'
 import type { ChannelMeta } from '../engine/trendlines'
 import { DISPLAY_TZ_LABEL, formatCrosshair } from '../util/time'
 
@@ -79,6 +79,11 @@ export default function RightPanels({
 }
 
 // ---------- Strategy Summary ----------
+// Direction A — minimal lines + summary:
+//  LIVE trade card (only when an open trade has SL/TP)
+//  one-line stats row + equity row
+//  closed trades list (compact, one row per trade)
+//  settings (lot size, balance)
 function StrategySummary({
   stats,
   enabled,
@@ -100,99 +105,63 @@ function StrategySummary({
   const equityPct = startingBalance > 0 ? (equityDelta / startingBalance) * 100 : 0
   const equityColor = equityDelta > 0 ? theme.up : equityDelta < 0 ? theme.down : theme.text
   const exposureOz = lotSize * 100
+  const open = stats.openTrade
+  const hasOpenWithLevels = !!(open && open.sl !== undefined && open.tp !== undefined)
 
   return (
     <Panel label="Strategy" extra={enabled ? 'Price Action Beta' : 'OFF'}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {/* equity hero */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-          <span
-            style={{
-              fontSize: 9,
-              letterSpacing: 1,
-              color: theme.textInactive,
-              fontFamily: fonts.mono,
-              textTransform: 'uppercase',
-            }}
-          >
-            Equity
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {hasOpenWithLevels && open && (
+          <LiveTradeCard open={open} markPrice={markPrice} unrealizedPnl={stats.unrealizedPnl} />
+        )}
+
+        {/* one-line summary: closed count · W/L */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 10,
+            fontFamily: fonts.mono,
+            fontSize: 11,
+            color: theme.text,
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          <span>{stats.totalTrades} closed</span>
+          {stats.totalTrades > 0 && (
+            <>
+              <span style={{ color: theme.textInactive }}>·</span>
+              <span style={{ color: theme.up }}>{stats.wins}W</span>
+              <span style={{ color: theme.textInactive }}>/</span>
+              <span style={{ color: theme.down }}>{stats.losses}L</span>
+            </>
+          )}
+        </div>
+
+        {/* realized + equity */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 10,
+            fontFamily: fonts.mono,
+            fontSize: 11,
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          <span style={{ color: pnlColor(stats.realizedPnl) ?? theme.textInactive }}>
+            {formatSignedMoney(stats.realizedPnl)} realized
           </span>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-            <span
-              style={{
-                fontFamily: fonts.mono,
-                fontSize: 22,
-                fontWeight: 600,
-                color: equityColor,
-                fontVariantNumeric: 'tabular-nums',
-                letterSpacing: -0.3,
-              }}
-            >
-              {formatMoney(stats.equity)}
-            </span>
-            <span
-              style={{
-                fontFamily: fonts.mono,
-                fontSize: 11,
-                color: equityColor,
-                fontVariantNumeric: 'tabular-nums',
-              }}
-            >
-              {formatSignedPct(equityPct)}
-            </span>
-          </div>
+          <span style={{ color: theme.textInactive }}>·</span>
+          <span style={{ color: equityColor }}>
+            {formatMoney(stats.equity)} {formatSignedPct(equityPct)}
+          </span>
         </div>
 
-        {/* PnL split */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Row
-            k="REALIZED"
-            v={formatSignedMoney(stats.realizedPnl)}
-            color={pnlColor(stats.realizedPnl)}
-          />
-          <Row
-            k="OPEN"
-            v={formatSignedMoney(stats.unrealizedPnl)}
-            color={pnlColor(stats.unrealizedPnl)}
-            muted={stats.openTrade === null}
-          />
-        </div>
-
-        <Hairline />
-
-        {/* trade stats */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Row k="TRADES" v={stats.totalTrades.toString()} />
-          <Row
-            k="WIN RATE"
-            v={
-              stats.winRate === null
-                ? '—'
-                : `${(stats.winRate * 100).toFixed(0)}%  ·  ${stats.wins}W/${stats.losses}L`
-            }
-          />
-          <Row
-            k="AVG W/L"
-            v={
-              stats.totalTrades === 0
-                ? '—'
-                : `${formatSignedMoney(stats.avgWin)} / ${formatSignedMoney(stats.avgLoss)}`
-            }
-            muted={stats.totalTrades === 0}
-          />
-        </div>
-
-        {/* open position card */}
-        {stats.openTrade && markPrice !== null && (
+        {stats.closedTrades.length > 0 && (
           <>
             <Hairline />
-            <PositionCard
-              side={stats.openTrade.side}
-              entryPrice={stats.openTrade.entryPrice}
-              markPrice={markPrice}
-              unrealizedPnl={stats.unrealizedPnl}
-              exposureOz={exposureOz}
-            />
+            <ClosedTradesList trades={stats.closedTrades} />
           </>
         )}
 
@@ -226,66 +195,159 @@ function StrategySummary({
   )
 }
 
-function PositionCard({
-  side,
-  entryPrice,
+function LiveTradeCard({
+  open,
   markPrice,
   unrealizedPnl,
-  exposureOz,
 }: {
-  side: 'long' | 'short'
-  entryPrice: number
-  markPrice: number
+  open: NonNullable<StrategyStats['openTrade']>
+  markPrice: number | null
   unrealizedPnl: number
-  exposureOz: number
 }) {
-  const sideColor = side === 'long' ? theme.up : theme.down
+  // open.sl / open.tp are guaranteed by the caller (`hasOpenWithLevels`),
+  // but TS doesn't carry that narrowing across the prop boundary.
+  const sl = open.sl as number
+  const tp = open.tp as number
+  const rDist = Math.abs(sl - open.entryPrice)
+  const rOf = (price: number) =>
+    rDist > 0
+      ? (open.side === 'short' ? open.entryPrice - price : price - open.entryPrice) / rDist
+      : 0
+  const slR = rOf(sl) // -1 by construction
+  const tpR = rOf(tp) // +3 in PAB v1
+  const nowR = markPrice !== null && rDist > 0 ? rOf(markPrice) : null
+  const sideColor = open.side === 'short' ? theme.down : theme.up
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          fontFamily: fonts.mono,
-          fontSize: 11,
-        }}
-      >
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '8px 10px',
+        border: `1px solid ${theme.border}`,
+        borderLeft: `2px solid ${theme.accent}`,
+        background: theme.bg,
+        fontFamily: fonts.mono,
+        fontSize: 11,
+        fontVariantNumeric: 'tabular-nums',
+      }}
+    >
+      {/* header: LIVE pill · label · side · channel */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span
           style={{
-            color: sideColor,
-            fontWeight: 600,
-            letterSpacing: 0.6,
+            display: 'inline-block',
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: theme.accent,
           }}
-        >
-          {side.toUpperCase()}
+        />
+        <span style={{ color: theme.accent, fontSize: 9, letterSpacing: 1.4, fontWeight: 600 }}>
+          LIVE
         </span>
-        <span style={{ color: theme.textMuted }}>·</span>
-        <span style={{ color: theme.text, fontVariantNumeric: 'tabular-nums' }}>
-          {exposureOz.toFixed(2).replace(/\.00$/, '')} oz
-        </span>
-        <span style={{ flex: 1 }} />
-        <span
-          style={{
-            color: pnlColor(unrealizedPnl),
-            fontWeight: 600,
-            fontVariantNumeric: 'tabular-nums',
-          }}
-        >
-          {formatSignedMoney(unrealizedPnl)}
-        </span>
+        <span style={{ color: theme.text }}>{open.label ?? ''}</span>
+        <span style={{ color: sideColor, fontWeight: 600 }}>{open.side.toUpperCase()}</span>
+        {open.channelLabel && (
+          <span style={{ color: theme.textInactive }}>ch={open.channelLabel}</span>
+        )}
       </div>
+      {/* entry / SL / TP / now grid — kept simple per mockup */}
+      <LiveRow k="entry" v={`$${open.entryPrice.toFixed(2)}`} />
+      <LiveRow k="SL" v={`$${sl.toFixed(2)}`} r={slR} accent={theme.down} />
+      <LiveRow k="TP" v={`$${tp.toFixed(2)}`} r={tpR} accent={theme.up} />
+      <LiveRow
+        k="now"
+        v={markPrice !== null ? formatSignedMoney(unrealizedPnl) : '—'}
+        r={nowR}
+        accent={pnlColor(unrealizedPnl)}
+      />
+    </div>
+  )
+}
+
+function LiveRow({
+  k,
+  v,
+  r,
+  accent,
+}: {
+  k: string
+  v: string
+  r?: number | null
+  accent?: string
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+      <span style={{ color: theme.textInactive, width: 36 }}>{k}</span>
+      <span style={{ color: accent ?? theme.text, fontWeight: 500 }}>{v}</span>
+      {r !== undefined && r !== null && (
+        <span style={{ color: theme.textInactive, marginLeft: 'auto' }}>
+          {r >= 0 ? '+' : ''}
+          {r.toFixed(r === Math.trunc(r) ? 0 : 1)}R
+        </span>
+      )}
+    </div>
+  )
+}
+
+function ClosedTradesList({ trades }: { trades: ReadonlyArray<ClosedTrade> }) {
+  // Newest at the top — easier to spot most recent trade.
+  const reversed = [...trades].reverse()
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
       <div
         style={{
-          fontFamily: fonts.mono,
-          fontSize: 10,
+          fontSize: 9,
+          letterSpacing: 1.2,
           color: theme.textInactive,
-          letterSpacing: 0.3,
-          fontVariantNumeric: 'tabular-nums',
+          fontFamily: fonts.mono,
+          textTransform: 'uppercase',
+          marginBottom: 2,
         }}
       >
-        @ {entryPrice.toFixed(3)} → {markPrice.toFixed(3)}
+        Closed ({trades.length})
       </div>
+      {reversed.map((t) => (
+        <ClosedTradeRow key={`${t.entryTime}-${t.exitTime}`} trade={t} />
+      ))}
+    </div>
+  )
+}
+
+function ClosedTradeRow({ trade }: { trade: ClosedTrade }) {
+  const isWin = trade.pnl > 0
+  const rText =
+    trade.rMultiple !== undefined && Number.isFinite(trade.rMultiple)
+      ? `${trade.rMultiple >= 0 ? '+' : ''}${trade.rMultiple.toFixed(1)}R`
+      : null
+  const durMin = Math.max(0, Math.round(((trade.exitTime as number) - (trade.entryTime as number)) / 60))
+  const reasonText = trade.reason ?? '—'
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 6,
+        fontFamily: fonts.mono,
+        fontSize: 10,
+        fontVariantNumeric: 'tabular-nums',
+        color: theme.text,
+      }}
+    >
+      <span style={{ minWidth: 44 }}>{trade.label ?? '—'}</span>
+      {rText && (
+        <span style={{ color: isWin ? theme.up : theme.down, minWidth: 38, fontWeight: 500 }}>
+          {rText}
+        </span>
+      )}
+      {trade.channelLabel && (
+        <span style={{ color: theme.textInactive, minWidth: 28 }}>{trade.channelLabel}</span>
+      )}
+      <span style={{ color: theme.textInactive }}>{reasonText}</span>
+      <span style={{ flex: 1 }} />
+      <span style={{ color: theme.textInactive }}>{durMin}m</span>
     </div>
   )
 }

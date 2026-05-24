@@ -74,6 +74,10 @@ export default function TradingResearchSandbox() {
   const cvdSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const cvdZeroLineRef = useRef<IPriceLine | null>(null)
   const emaSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
+  // SL/TP horizontal price lines for the currently-open strategy trade.
+  // Created on open, removed on close. Re-created on theme/strategy changes.
+  const tradeSlLineRef = useRef<IPriceLine | null>(null)
+  const tradeTpLineRef = useRef<IPriceLine | null>(null)
   // Pool of LineSeries pairs (resistance + support) — grows on demand,
   // one pair per detected channel. History entries get a faded color.
   const channelsSeriesPoolRef = useRef<Array<{
@@ -1085,15 +1089,68 @@ export default function TradingResearchSandbox() {
   useEffect(() => {
     const cs = candleSeriesRef.current
     if (!cs) return
-    const markers: SeriesMarker<Time>[] = signals.map((s) => ({
-      time: s.time,
-      position: s.side === 'buy' ? 'belowBar' : 'aboveBar',
-      color: s.side === 'buy' ? colors.up : colors.down,
-      shape: s.side === 'buy' ? 'arrowUp' : 'arrowDown',
-      text: s.label,
-    }))
+    // Build a quick lookup so exits can append "±NR" to their label by
+    // referencing the matching entry's stop distance.
+    const entryByLabel = new Map<string, Signal>()
+    for (const s of signals) {
+      if (s.side === 'sell' && s.label) entryByLabel.set(s.label, s)
+    }
+    const markers: SeriesMarker<Time>[] = signals.map((s) => {
+      let text = s.label ?? ''
+      if (s.side === 'buy' && s.label) {
+        const entry = entryByLabel.get(s.label)
+        if (entry && entry.sl !== undefined) {
+          const rDist = Math.abs(entry.sl - entry.price)
+          if (rDist > 0) {
+            // Short: gain when price moves down from entry.
+            const rMult = (entry.price - s.price) / rDist
+            const sign = rMult >= 0 ? '+' : ''
+            text = `${s.label}  ${sign}${rMult.toFixed(1)}R`
+          }
+        }
+      }
+      return {
+        time: s.time,
+        position: s.side === 'buy' ? 'belowBar' : 'aboveBar',
+        color: s.side === 'buy' ? colors.up : colors.down,
+        shape: s.side === 'buy' ? 'arrowUp' : 'arrowDown',
+        text,
+      }
+    })
     cs.setMarkers(markers)
   }, [signals, chartsReady, themeMode])
+
+  // ---------- SL/TP horizontal price lines on the open strategy trade ----------
+  useEffect(() => {
+    const cs = candleSeriesRef.current
+    if (!cs) return
+    if (tradeSlLineRef.current) {
+      cs.removePriceLine(tradeSlLineRef.current)
+      tradeSlLineRef.current = null
+    }
+    if (tradeTpLineRef.current) {
+      cs.removePriceLine(tradeTpLineRef.current)
+      tradeTpLineRef.current = null
+    }
+    const open = strategyStats.openTrade
+    if (!open || open.sl === undefined || open.tp === undefined) return
+    tradeSlLineRef.current = cs.createPriceLine({
+      price: open.sl,
+      color: colors.down,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: `SL ${open.label ?? ''}`.trim(),
+    })
+    tradeTpLineRef.current = cs.createPriceLine({
+      price: open.tp,
+      color: colors.up,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: `TP ${open.label ?? ''}`.trim(),
+    })
+  }, [strategyStats.openTrade, chartsReady, themeMode])
 
   // ---------- re-apply pinned range after timeframe / dataset switch ----------
   useEffect(() => {
