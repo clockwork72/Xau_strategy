@@ -1,14 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { theme, fonts, sizes } from '../theme'
-import type { Candle, Timeframe } from '../types'
 import type { ClosedTrade, StrategyStats } from '../engine/portfolio'
 import type { ChannelMeta } from '../engine/trendlines'
 import type { SlMode } from '../engine/priceActionBeta'
-import { DISPLAY_TZ_LABEL, formatCrosshair } from '../util/time'
 
 interface Props {
-  timeframe: Timeframe
-  hovered: Candle | null
   stats: StrategyStats
   strategyEnabled: boolean
   lotSize: number
@@ -22,6 +18,8 @@ interface Props {
   onZoomSensitivityChange: (n: number) => void
   pabSlMode: SlMode
   onPabSlModeChange: (m: SlMode) => void
+  pabRedOnly: boolean
+  onPabRedOnlyChange: (v: boolean) => void
   channelsMeta: ChannelMeta[]
   showResistance: boolean
   showSupport: boolean
@@ -32,8 +30,6 @@ interface Props {
 }
 
 export default function RightPanels({
-  timeframe,
-  hovered,
   stats,
   strategyEnabled,
   lotSize,
@@ -47,6 +43,8 @@ export default function RightPanels({
   onZoomSensitivityChange,
   pabSlMode,
   onPabSlModeChange,
+  pabRedOnly,
+  onPabRedOnlyChange,
   channelsMeta,
   showResistance,
   showSupport,
@@ -87,13 +85,13 @@ export default function RightPanels({
         onToggleLabelHidden={onToggleChannelLabelHidden}
         onClearHiddenLabels={onClearHiddenChannelLabels}
       />
-      <BarInspector hovered={hovered} />
-      <Notes timeframe={timeframe} />
       <SettingsSection
         zoomSensitivity={zoomSensitivity}
         onZoomSensitivityChange={onZoomSensitivityChange}
         pabSlMode={pabSlMode}
         onPabSlModeChange={onPabSlModeChange}
+        pabRedOnly={pabRedOnly}
+        onPabRedOnlyChange={onPabRedOnlyChange}
       />
     </aside>
   )
@@ -860,110 +858,6 @@ function StatusPill({ broken }: { broken: boolean }) {
   )
 }
 
-// ---------- Bar Inspector ----------
-function BarInspector({ hovered }: { hovered: Candle | null }) {
-  const c = hovered
-  return (
-    <Panel label="Bar Inspector" minHeight={150}>
-      {c === null ? (
-        <Placeholder text="— hover a bar" />
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontFamily: fonts.mono, fontSize: 11 }}>
-          <Row k={`TIME · ${DISPLAY_TZ_LABEL}`} v={formatCrosshair(c.time as number)} />
-          <Row k="OPEN" v={c.open.toFixed(3)} />
-          <Row
-            k="HIGH"
-            v={c.high.toFixed(3)}
-            color={c.close > c.open ? theme.up : undefined}
-          />
-          <Row
-            k="LOW"
-            v={c.low.toFixed(3)}
-            color={c.close < c.open ? theme.down : undefined}
-          />
-          <Row k="CLOSE" v={c.close.toFixed(3)} bold />
-          <Row k="RANGE" v={(c.high - c.low).toFixed(3)} muted />
-          <Row k="DELTA" v={(c.close - c.open).toFixed(3)} color={c.close > c.open ? theme.up : theme.down} />
-          <Row k="TICKVOL" v={c.tickVolume.toLocaleString()} muted />
-          {/* body-position bar */}
-          <div style={{ marginTop: 4, height: 4, background: theme.surface, borderRadius: 2, position: 'relative' }}>
-            <div
-              style={{
-                position: 'absolute',
-                left: `${bodyLeftPct(c)}%`,
-                width: `${bodyWidthPct(c)}%`,
-                top: 0,
-                bottom: 0,
-                background: c.close >= c.open ? theme.up : theme.down,
-                borderRadius: 2,
-              }}
-            />
-          </div>
-        </div>
-      )}
-    </Panel>
-  )
-}
-
-function bodyLeftPct(c: Candle) {
-  const rng = c.high - c.low
-  if (rng <= 0) return 0
-  return (Math.min(c.open, c.close) - c.low) / rng * 100
-}
-function bodyWidthPct(c: Candle) {
-  const rng = c.high - c.low
-  if (rng <= 0) return 100
-  return Math.max(1, Math.abs(c.close - c.open) / rng * 100)
-}
-
-// ---------- Notes ----------
-function Notes({ timeframe }: { timeframe: Timeframe }) {
-  const key = `xau-sbx-notes-${timeframe}`
-  const [val, setVal] = useState<string>('')
-
-  useEffect(() => {
-    try {
-      setVal(localStorage.getItem(key) ?? '')
-    } catch {
-      setVal('')
-    }
-  }, [key])
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      try {
-        localStorage.setItem(key, val)
-      } catch {
-        /* ignore */
-      }
-    }, 300)
-    return () => clearTimeout(t)
-  }, [val, key])
-
-  return (
-    <Panel label="Notes" extra={timeframe} flex={1}>
-      <textarea
-        value={val}
-        onChange={(e) => setVal(e.target.value)}
-        style={{
-          width: '100%',
-          height: '100%',
-          minHeight: 120,
-          background: theme.surface,
-          border: `1px solid ${theme.border}`,
-          borderRadius: 5,
-          color: theme.text,
-          fontFamily: fonts.sans,
-          fontSize: 11,
-          padding: 8,
-          resize: 'none',
-          outline: 'none',
-        }}
-      />
-    </Panel>
-  )
-}
-
 // ---------- Settings ----------
 // Sandbox-wide chart settings. Right now: just zoom sensitivity. The live
 // value is mirrored into a ref in the sandbox so the wheel handler picks it
@@ -974,11 +868,15 @@ function SettingsSection({
   onZoomSensitivityChange,
   pabSlMode,
   onPabSlModeChange,
+  pabRedOnly,
+  onPabRedOnlyChange,
 }: {
   zoomSensitivity: number
   onZoomSensitivityChange: (n: number) => void
   pabSlMode: SlMode
   onPabSlModeChange: (m: SlMode) => void
+  pabRedOnly: boolean
+  onPabRedOnlyChange: (v: boolean) => void
 }) {
   return (
     <Panel label="Settings">
@@ -1003,6 +901,16 @@ function SettingsSection({
           ]}
           onChange={onPabSlModeChange}
           hint="v1: SL = entry-bar high + buffer · v2: SL = entry + ¼ × channel height, TP = entry − ¾ × height"
+        />
+        <SegmentedRow<'any' | 'red'>
+          label="PAB ENTRY CANDLE"
+          value={pabRedOnly ? 'red' : 'any'}
+          options={[
+            { value: 'any', label: 'any wick rejection' },
+            { value: 'red', label: 'red only' },
+          ]}
+          onChange={(v) => onPabRedOnlyChange(v === 'red')}
+          hint="any: fire on green or red rejection · red only: require close < open (stronger bearish conviction)"
         />
       </div>
     </Panel>
@@ -1206,46 +1114,3 @@ function Panel({
   )
 }
 
-function Row({
-  k,
-  v,
-  bold,
-  muted,
-  color,
-}: {
-  k: string
-  v: string
-  bold?: boolean
-  muted?: boolean
-  color?: string
-}) {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-      <span style={{ color: theme.textInactive, fontSize: 10, letterSpacing: 0.5 }}>{k}</span>
-      <span
-        style={{
-          color: color ?? (muted ? theme.textInactive : theme.text),
-          fontWeight: bold ? 600 : 400,
-          fontVariantNumeric: 'tabular-nums',
-        }}
-      >
-        {v}
-      </span>
-    </div>
-  )
-}
-
-function Placeholder({ text }: { text: string }) {
-  return (
-    <div
-      style={{
-        color: theme.textInactive,
-        fontSize: 11,
-        fontFamily: fonts.mono,
-        padding: '6px 0',
-      }}
-    >
-      {text}
-    </div>
-  )
-}

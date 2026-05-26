@@ -81,6 +81,13 @@ const ZOOM_SENSITIVITY_MAX = 3.0
 const PAB_SL_MODE_LS_KEY = 'xau:pab-sl-mode'
 const DEFAULT_PAB_SL_MODE: SlMode = 'wick'
 
+// PAB entry-candle filter. 'red' requires close < open (true bearish bar);
+// 'any' fires on any candle passing the upper-wick rejection test. On the
+// 2026-05-20→26 sample, v2 + red collapsed Max DD from $6.89 to $2.25 with
+// near-identical pnl. Default 'any' for backward compatibility.
+const PAB_RED_ONLY_LS_KEY = 'xau:pab-red-only'
+const DEFAULT_PAB_RED_ONLY = false
+
 import TopBar from './TopBar'
 import LeftNav from './LeftNav'
 import RightPanels from './RightPanels'
@@ -244,6 +251,20 @@ export default function TradingResearchSandbox() {
   useEffect(() => {
     try { localStorage.setItem(PAB_SL_MODE_LS_KEY, pabSlMode) } catch { /* ignore */ }
   }, [pabSlMode])
+
+  // PAB entry-candle filter — Settings panel toggle. Same reset-on-change
+  // wiring as pabSlMode via pabSettingsKeyRef.
+  const [pabRedOnly, setPabRedOnly] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem(PAB_RED_ONLY_LS_KEY)
+      if (stored === 'true') return true
+      if (stored === 'false') return false
+    } catch { /* ignore */ }
+    return DEFAULT_PAB_RED_ONLY
+  })
+  useEffect(() => {
+    try { localStorage.setItem(PAB_RED_ONLY_LS_KEY, String(pabRedOnly)) } catch { /* ignore */ }
+  }, [pabRedOnly])
 
   // ---------- replay ----------
   const {
@@ -1208,7 +1229,7 @@ export default function TradingResearchSandbox() {
   // tracker. Mutating a ref inside useMemo is the project's established
   // pattern for cross-render state — see the channelsMeta tracker above.
   const signals = useMemo<Signal[]>(() => {
-    const settingsKey = `${timeframe}|${appliedRange?.from ?? 'na'}|${appliedRange?.to ?? 'na'}|${strategyEnabled ? 'on' : 'off'}|${pabSlMode}`
+    const settingsKey = `${timeframe}|${appliedRange?.from ?? 'na'}|${appliedRange?.to ?? 'na'}|${strategyEnabled ? 'on' : 'off'}|${pabSlMode}|${pabRedOnly ? 'red' : 'any'}`
     if (settingsKey !== pabSettingsKeyRef.current) {
       pabStateRef.current = PAB_INITIAL_STATE
       pabSettingsKeyRef.current = settingsKey
@@ -1222,10 +1243,11 @@ export default function TradingResearchSandbox() {
       ema21ByTime,
       pabStateRef.current,
       pabSlMode,
+      pabRedOnly,
     )
     pabStateRef.current = newState
     return newState.signals
-  }, [algoCandles, strategyEnabled, liveSupportChannels, ema21ByTime, timeframe, appliedRange, pabSlMode])
+  }, [algoCandles, strategyEnabled, liveSupportChannels, ema21ByTime, timeframe, appliedRange, pabSlMode, pabRedOnly])
 
   // ---------- Strategy stats (winrate, PnL, equity, open position) ----------
   const markPrice = visibleCandles.length > 0 ? visibleCandles[visibleCandles.length - 1].close : null
@@ -1556,8 +1578,6 @@ export default function TradingResearchSandbox() {
         </main>
 
         <RightPanels
-          timeframe={timeframe}
-          hovered={hoveredCandle}
           stats={strategyStats}
           strategyEnabled={strategyEnabled}
           lotSize={lotSize}
@@ -1571,6 +1591,8 @@ export default function TradingResearchSandbox() {
           onZoomSensitivityChange={setZoomSensitivity}
           pabSlMode={pabSlMode}
           onPabSlModeChange={setPabSlMode}
+          pabRedOnly={pabRedOnly}
+          onPabRedOnlyChange={setPabRedOnly}
           channelsMeta={channelsMeta}
           showResistance={showResistance}
           showSupport={showSupport}
