@@ -10,6 +10,12 @@ const RR = 3
 // A classic shooting-star rejection still passes — its body sits ~20-40%
 // of the range with the upper wick taking the rest.
 const MIN_BODY_TO_RANGE = 0.15
+// Move SL to entry (breakeven) once MFE crosses this R-multiple. Saves
+// the "worked then unworked" reversal — picked from the 2026-05-21→26
+// trailing-stop sweep where +1R was the cutoff that salvaged PAB-4 and
+// PAB-5 without choking any winners (full +3R runs never retraced past
+// entry first on the sample). Set to 0 to disable.
+const BE_TRIGGER_R = 1
 
 interface OpenShort {
   entryTime: number
@@ -120,43 +126,69 @@ export function runPriceActionBeta(
 
   const newSignals: Signal[] = []
 
-  // Exit scan: walk bars strictly after max(lastProcessedTime, entryTime)
-  // up to the playhead. For a fresh forward step this is just the new bar.
-  // For scrub-into-trade or multi-bar forward jumps it covers everything new.
+  // Exit scan with breakeven management. We rescan from open.entryTime
+  // each tick (cheap — a few dozen bars max) so the BE state is derived
+  // statelessly from the bars themselves, mirroring how `open` is
+  // derived from signals. Only NEW bars (t > lastProcessedTime) emit
+  // signals/logs — past bars are walked silently to reconstruct state.
+  //
+  // Same-bar order matches real execution:
+  //   1. high ≥ effectiveSL → exit at SL (current effective level)
+  //   2. low ≤ TP → exit at TP
+  //   3. low ≤ entry−1R AND BE not yet armed → move SL to entry
+  // Step 3 applies to FUTURE bars only — a bar that triggers BE doesn't
+  // also retroactively benefit from the moved SL on its own high.
   if (open) {
-    const scanFromTime = Math.max(prevState.lastProcessedTime, open.entryTime)
+    const r = Math.abs(open.sl - open.entryPrice)
+    const beTriggerPrice = open.entryPrice - BE_TRIGGER_R * r
+    let effectiveSL = open.sl
+    let beActive = false
     for (let i = 0; i < candles.length; i++) {
       const bar = candles[i]
       const t = bar.time as number
-      if (t <= scanFromTime) continue
+      if (t <= open.entryTime) continue
       if (t > playheadTime) break
-      if (bar.high >= open.sl) {
-        newSignals.push({
-          time: bar.time,
-          side: 'buy',
-          price: open.sl,
-          label: open.label,
-          reason: 'stop',
-        })
-        console.log(
-          `[strategy] exit label=${open.label} reason=stop price=${open.sl.toFixed(2)} at=${t}`,
-        )
+      const isNew = t > prevState.lastProcessedTime
+      if (bar.high >= effectiveSL) {
+        if (isNew) {
+          newSignals.push({
+            time: bar.time,
+            side: 'buy',
+            price: effectiveSL,
+            label: open.label,
+            reason: 'stop',
+          })
+          console.log(
+            `[strategy] exit label=${open.label} reason=stop${beActive ? '(BE)' : ''} price=${effectiveSL.toFixed(2)} at=${t}`,
+          )
+        }
         open = null
         break
       }
       if (bar.low <= open.tp) {
-        newSignals.push({
-          time: bar.time,
-          side: 'buy',
-          price: open.tp,
-          label: open.label,
-          reason: 'target',
-        })
-        console.log(
-          `[strategy] exit label=${open.label} reason=target price=${open.tp.toFixed(2)} at=${t}`,
-        )
+        if (isNew) {
+          newSignals.push({
+            time: bar.time,
+            side: 'buy',
+            price: open.tp,
+            label: open.label,
+            reason: 'target',
+          })
+          console.log(
+            `[strategy] exit label=${open.label} reason=target price=${open.tp.toFixed(2)} at=${t}`,
+          )
+        }
         open = null
         break
+      }
+      if (BE_TRIGGER_R > 0 && !beActive && bar.low <= beTriggerPrice) {
+        beActive = true
+        effectiveSL = open.entryPrice
+        if (isNew) {
+          console.log(
+            `[strategy] breakeven label=${open.label} sl→${effectiveSL.toFixed(2)} at=${t}`,
+          )
+        }
       }
     }
   }
