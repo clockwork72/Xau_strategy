@@ -4,6 +4,16 @@ import { TOUCH_PCT, extendChannelToTime, type ChannelMeta } from './trendlines'
 
 const STOP_BUFFER_PCT = 0.0002
 const RR = 3
+
+/** Stop-loss anchoring mode.
+ *  - 'wick' (v1, default): SL = entry candle high + STOP_BUFFER_PCT × mid.
+ *      R varies with the entry bar's upper wick.
+ *  - 'channel-frac' (v2): SL = entry close + ¼ × channel height. R adapts
+ *      to the channel's volatility envelope; TP = entry − ¾ × height
+ *      sits ~¼ above the lower rail (mean-reversion target).
+ *  Validated on 2026-05-20→26 sample where v2 produced +9R vs v1's +2R
+ *  with ~identical Max DD. */
+export type SlMode = 'wick' | 'channel-frac'
 // Minimum body share of the candle's total range. Excludes dojis and
 // spinning-tops where `upper_wick > body` is satisfied trivially because
 // the body itself is tiny (e.g. the M5 10:25 / 16:50 candles user flagged).
@@ -101,6 +111,7 @@ export function runPriceActionBeta(
   liveSupportChannels: ReadonlyArray<ChannelMeta>,
   ema21ByTime: Map<number, number>,
   prevState: PABState,
+  slMode: SlMode = 'wick',
 ): PABState {
   if (candles.length === 0) return PAB_INITIAL_STATE
 
@@ -201,14 +212,28 @@ export function runPriceActionBeta(
     if (ema !== undefined && bar.close > ema && isUpperWickRejection(bar)) {
       for (const meta of liveSupportChannels) {
         if (t < meta.channel.startTime) continue
-        const rail = upperRailAt(meta, t)
+        const extended = extendChannelToTime(meta.channel, t)
+        const rail = extended.upperEnd
         if (Math.abs(bar.close - rail) > eps) continue
 
         tradeCount += 1
         const label = `PAB-${tradeCount}`
-        const sl = bar.high + stopBuffer
-        const r = sl - bar.close
-        const tp = bar.close - RR * r
+        let sl: number
+        let r: number
+        let tp: number
+        if (slMode === 'channel-frac') {
+          // v2: R = H/4 (¼ of channel height up from entry).
+          // TP = entry − 3H/4 (¾ below entry → ~¼ above lower rail).
+          const height = extended.upperEnd - extended.lowerEnd
+          r = height / 4
+          sl = bar.close + r
+          tp = bar.close - RR * r
+        } else {
+          // v1 (wick): SL anchored to entry-bar high + small buffer.
+          sl = bar.high + stopBuffer
+          r = sl - bar.close
+          tp = bar.close - RR * r
+        }
 
         newSignals.push({
           time: bar.time,
@@ -220,7 +245,7 @@ export function runPriceActionBeta(
           channelLabel: meta.label,
         })
         console.log(
-          `[strategy] entry label=${label} ch=${meta.label} close=${bar.close.toFixed(2)} rail=${rail.toFixed(2)} ema=${ema.toFixed(2)} SL=${sl.toFixed(2)} TP=${tp.toFixed(2)} R=${r.toFixed(2)}`,
+          `[strategy] entry label=${label} mode=${slMode === 'channel-frac' ? 'v2' : 'v1'} ch=${meta.label} close=${bar.close.toFixed(2)} rail=${rail.toFixed(2)} ema=${ema.toFixed(2)} SL=${sl.toFixed(2)} TP=${tp.toFixed(2)} R=${r.toFixed(2)}`,
         )
 
         open = { entryTime: t, entryPrice: bar.close, sl, tp, label, channelLabel: meta.label }
