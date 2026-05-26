@@ -17,12 +17,19 @@ import {
 import { theme, fonts, sizes, palettes } from '../theme'
 import type { Candle, Timeframe } from '../types'
 import { computeEma } from '../engine/indicators'
-import { runPriceActionBeta, PAB_INITIAL_STATE, type PABState } from '../engine/priceActionBeta'
+import {
+  runPriceActionBeta,
+  PAB_INITIAL_STATE,
+  type PABState,
+  type SlMode,
+} from '../engine/priceActionBeta'
 import type { Signal } from '../engine/strategy'
 import { computeStats } from '../engine/portfolio'
 import { findSwingHighs, findSwingLows, type SwingPoint } from '../engine/swings'
 import {
   channelSignature,
+  emaOutsideRailsFrac,
+  EMA_OUTSIDE_MAX_FRAC,
   extendChannelToTime,
   findChannelBreak,
   pickChannels,
@@ -67,6 +74,12 @@ const DEFAULT_ZOOM_SENSITIVITY = 1.4
 const ZOOM_SENSITIVITY_LS_KEY = 'xau:zoom-sensitivity'
 const ZOOM_SENSITIVITY_MIN = 1.05
 const ZOOM_SENSITIVITY_MAX = 3.0
+
+// PAB stop-loss anchoring. v1 (wick) is the historical default; v2
+// (channel-frac) sizes the SL as ¼ of channel height (validated on the
+// 2026-05-20→26 sample as +9R vs v1's +2R). Persisted to localStorage.
+const PAB_SL_MODE_LS_KEY = 'xau:pab-sl-mode'
+const DEFAULT_PAB_SL_MODE: SlMode = 'wick'
 
 import TopBar from './TopBar'
 import LeftNav from './LeftNav'
@@ -217,6 +230,20 @@ export default function TradingResearchSandbox() {
     zoomSensitivityRef.current = zoomSensitivity
     try { localStorage.setItem(ZOOM_SENSITIVITY_LS_KEY, String(zoomSensitivity)) } catch { /* ignore */ }
   }, [zoomSensitivity])
+
+  // PAB SL anchoring mode — Settings panel toggle. Reset of pabStateRef is
+  // wired through pabSettingsKeyRef below so switching mode mid-replay
+  // re-runs the strategy cleanly from the start.
+  const [pabSlMode, setPabSlMode] = useState<SlMode>(() => {
+    try {
+      const stored = localStorage.getItem(PAB_SL_MODE_LS_KEY)
+      if (stored === 'wick' || stored === 'channel-frac') return stored
+    } catch { /* ignore */ }
+    return DEFAULT_PAB_SL_MODE
+  })
+  useEffect(() => {
+    try { localStorage.setItem(PAB_SL_MODE_LS_KEY, pabSlMode) } catch { /* ignore */ }
+  }, [pabSlMode])
 
   // ---------- replay ----------
   const {
@@ -721,6 +748,16 @@ export default function TradingResearchSandbox() {
     lows: findSwingLows(algoCandles, TRENDLINE_LOOKBACK),
   }), [algoCandles])
 
+  // EMA(21) lookup. Computed on algoCandles so the EMA value at any
+  // playhead is identical regardless of loaded range. Defined above
+  // channelsMeta because channel detection now gates on EMA position
+  // (rejects channels disconnected from the medium-term trend).
+  const ema21ByTime = useMemo(() => {
+    const map = new Map<number, number>()
+    for (const p of computeEma(algoCandles, 21)) map.set(p.time as number, p.value)
+    return map
+  }, [algoCandles])
+
   // ---------- Trendline channels: touch-scored across all pivot pairs.
   // pickChannels returns distinct non-overlapping channels with ≥3 touches.
   // Labels (R1/R2/S1/S2…) are assigned by full enumeration order, so a
@@ -789,6 +826,16 @@ export default function TradingResearchSandbox() {
       // over loop below moves the frozen entry into next unchanged.
       if (prevFrozenByIdentity.has(identity)) continue
 
+      // Quality gate: drop channels disconnected from the medium-term
+      // trend (EMA21 spends > EMA_OUTSIDE_MAX_FRAC of the lifespan outside
+      // the rails). Skipped channels are not tracked → never tradable,
+      // never rendered. NaN (no EMA coverage) is treated as quality
+      // unknown → keep the channel.
+      const outsideFrac = emaOutsideRailsFrac(c, algoCandles, ema21ByTime)
+      if (!Number.isNaN(outsideFrac) && outsideFrac > EMA_OUTSIDE_MAX_FRAC) {
+        continue
+      }
+
       const breakT = findChannelBreak(c, algoCandles, eps)
       const extended = extendChannelToTime(c, breakT ?? lastTime)
       const sig = channelSignature(c)
@@ -826,7 +873,7 @@ export default function TradingResearchSandbox() {
 
     trackedChannelsRef.current = next
     return [...next.values()]
-  }, [algoSwings, trendlineEnabled, algoCandles, showResistance, showSupport])
+  }, [algoSwings, trendlineEnabled, algoCandles, showResistance, showSupport, ema21ByTime])
 
   // ---------- session.log: channel detect / freeze / drop / unfreeze ----------
   // Diffs tracked entries by KEY (not sig) so refinements within the same
@@ -1151,14 +1198,6 @@ export default function TradingResearchSandbox() {
     }
   }, [drawnLines, selectedLineId, chartsReady])
 
-  // EMA(21) lookup for the strategy. Computed on algoCandles so the EMA
-  // value at any playhead time is identical regardless of loaded range.
-  const ema21ByTime = useMemo(() => {
-    const map = new Map<number, number>()
-    for (const p of computeEma(algoCandles, 21)) map.set(p.time as number, p.value)
-    return map
-  }, [algoCandles])
-
   const liveSupportChannels = useMemo(
     () => channelsMeta.filter((m) => m.status === 'live' && m.channel.kind === 'support'),
     [channelsMeta],
@@ -1169,7 +1208,7 @@ export default function TradingResearchSandbox() {
   // tracker. Mutating a ref inside useMemo is the project's established
   // pattern for cross-render state — see the channelsMeta tracker above.
   const signals = useMemo<Signal[]>(() => {
-    const settingsKey = `${timeframe}|${appliedRange?.from ?? 'na'}|${appliedRange?.to ?? 'na'}|${strategyEnabled ? 'on' : 'off'}`
+    const settingsKey = `${timeframe}|${appliedRange?.from ?? 'na'}|${appliedRange?.to ?? 'na'}|${strategyEnabled ? 'on' : 'off'}|${pabSlMode}`
     if (settingsKey !== pabSettingsKeyRef.current) {
       pabStateRef.current = PAB_INITIAL_STATE
       pabSettingsKeyRef.current = settingsKey
@@ -1182,10 +1221,11 @@ export default function TradingResearchSandbox() {
       liveSupportChannels,
       ema21ByTime,
       pabStateRef.current,
+      pabSlMode,
     )
     pabStateRef.current = newState
     return newState.signals
-  }, [algoCandles, strategyEnabled, liveSupportChannels, ema21ByTime, timeframe, appliedRange])
+  }, [algoCandles, strategyEnabled, liveSupportChannels, ema21ByTime, timeframe, appliedRange, pabSlMode])
 
   // ---------- Strategy stats (winrate, PnL, equity, open position) ----------
   const markPrice = visibleCandles.length > 0 ? visibleCandles[visibleCandles.length - 1].close : null
@@ -1529,6 +1569,8 @@ export default function TradingResearchSandbox() {
           onZoomToTrade={handleZoomToTrade}
           zoomSensitivity={zoomSensitivity}
           onZoomSensitivityChange={setZoomSensitivity}
+          pabSlMode={pabSlMode}
+          onPabSlModeChange={setPabSlMode}
           channelsMeta={channelsMeta}
           showResistance={showResistance}
           showSupport={showSupport}

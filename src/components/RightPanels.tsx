@@ -3,6 +3,7 @@ import { theme, fonts, sizes } from '../theme'
 import type { Candle, Timeframe } from '../types'
 import type { ClosedTrade, StrategyStats } from '../engine/portfolio'
 import type { ChannelMeta } from '../engine/trendlines'
+import type { SlMode } from '../engine/priceActionBeta'
 import { DISPLAY_TZ_LABEL, formatCrosshair } from '../util/time'
 
 interface Props {
@@ -19,6 +20,8 @@ interface Props {
   onZoomToTrade: (from: number, to: number) => void
   zoomSensitivity: number
   onZoomSensitivityChange: (n: number) => void
+  pabSlMode: SlMode
+  onPabSlModeChange: (m: SlMode) => void
   channelsMeta: ChannelMeta[]
   showResistance: boolean
   showSupport: boolean
@@ -42,6 +45,8 @@ export default function RightPanels({
   onZoomToTrade,
   zoomSensitivity,
   onZoomSensitivityChange,
+  pabSlMode,
+  onPabSlModeChange,
   channelsMeta,
   showResistance,
   showSupport,
@@ -87,6 +92,8 @@ export default function RightPanels({
       <SettingsSection
         zoomSensitivity={zoomSensitivity}
         onZoomSensitivityChange={onZoomSensitivityChange}
+        pabSlMode={pabSlMode}
+        onPabSlModeChange={onPabSlModeChange}
       />
     </aside>
   )
@@ -965,13 +972,17 @@ function Notes({ timeframe }: { timeframe: Timeframe }) {
 function SettingsSection({
   zoomSensitivity,
   onZoomSensitivityChange,
+  pabSlMode,
+  onPabSlModeChange,
 }: {
   zoomSensitivity: number
   onZoomSensitivityChange: (n: number) => void
+  pabSlMode: SlMode
+  onPabSlModeChange: (m: SlMode) => void
 }) {
   return (
     <Panel label="Settings">
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <SliderRow
           label="ZOOM SENSITIVITY"
           value={zoomSensitivity}
@@ -983,8 +994,91 @@ function SettingsSection({
           onChange={onZoomSensitivityChange}
           hint="per mouse-wheel notch · 1.10 ≈ default LWC · 1.40 default · 2.50 aggressive"
         />
+        <SegmentedRow
+          label="PAB SL MODE"
+          value={pabSlMode}
+          options={[
+            { value: 'wick', label: 'v1 · wick' },
+            { value: 'channel-frac', label: 'v2 · channel ¼H' },
+          ]}
+          onChange={onPabSlModeChange}
+          hint="v1: SL = entry-bar high + buffer · v2: SL = entry + ¼ × channel height, TP = entry − ¾ × height"
+        />
       </div>
     </Panel>
+  )
+}
+
+function SegmentedRow<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+  hint,
+}: {
+  label: string
+  value: T
+  options: ReadonlyArray<{ value: T; label: string }>
+  onChange: (v: T) => void
+  hint?: string
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <span style={{ color: theme.textInactive, fontSize: 10, letterSpacing: 0.5 }}>
+        {label}
+      </span>
+      <div
+        style={{
+          display: 'flex',
+          gap: 0,
+          background: theme.surface,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 5,
+          padding: 2,
+        }}
+      >
+        {options.map((opt) => {
+          const active = opt.value === value
+          return (
+            <button
+              key={opt.value}
+              onClick={() => onChange(opt.value)}
+              style={{
+                flex: 1,
+                appearance: 'none',
+                background: active ? theme.accent : 'transparent',
+                color: active ? theme.panel : theme.textMuted,
+                border: 'none',
+                padding: '4px 6px',
+                fontSize: 10.5,
+                fontFamily: fonts.mono,
+                letterSpacing: 0.3,
+                borderRadius: 3,
+                cursor: 'pointer',
+                transition: 'background 120ms, color 120ms',
+                fontWeight: active ? 600 : 400,
+              }}
+              onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = theme.text }}
+              onMouseLeave={(e) => { if (!active) e.currentTarget.style.color = theme.textMuted }}
+            >
+              {opt.label}
+            </button>
+          )
+        })}
+      </div>
+      {hint && (
+        <span
+          style={{
+            fontFamily: fonts.mono,
+            fontSize: 9,
+            color: theme.textInactive,
+            lineHeight: 1.4,
+          }}
+        >
+          {hint}
+        </span>
+      )}
+    </div>
   )
 }
 
