@@ -15,6 +15,10 @@ interface Props {
   startingBalance: number
   onStartingBalanceChange: (n: number) => void
   markPrice: number | null
+  markTime: number | null
+  onZoomToTrade: (from: number, to: number) => void
+  zoomSensitivity: number
+  onZoomSensitivityChange: (n: number) => void
   channelsMeta: ChannelMeta[]
   showResistance: boolean
   showSupport: boolean
@@ -34,6 +38,10 @@ export default function RightPanels({
   startingBalance,
   onStartingBalanceChange,
   markPrice,
+  markTime,
+  onZoomToTrade,
+  zoomSensitivity,
+  onZoomSensitivityChange,
   channelsMeta,
   showResistance,
   showSupport,
@@ -62,6 +70,8 @@ export default function RightPanels({
         startingBalance={startingBalance}
         onStartingBalanceChange={onStartingBalanceChange}
         markPrice={markPrice}
+        markTime={markTime}
+        onZoomToTrade={onZoomToTrade}
       />
       <ChannelsList
         channels={channelsMeta}
@@ -74,6 +84,10 @@ export default function RightPanels({
       />
       <BarInspector hovered={hovered} />
       <Notes timeframe={timeframe} />
+      <SettingsSection
+        zoomSensitivity={zoomSensitivity}
+        onZoomSensitivityChange={onZoomSensitivityChange}
+      />
     </aside>
   )
 }
@@ -92,6 +106,8 @@ function StrategySummary({
   startingBalance,
   onStartingBalanceChange,
   markPrice,
+  markTime,
+  onZoomToTrade,
 }: {
   stats: StrategyStats
   enabled: boolean
@@ -100,6 +116,8 @@ function StrategySummary({
   startingBalance: number
   onStartingBalanceChange: (n: number) => void
   markPrice: number | null
+  markTime: number | null
+  onZoomToTrade: (from: number, to: number) => void
 }) {
   const equityDelta = stats.equity - startingBalance
   const equityPct = startingBalance > 0 ? (equityDelta / startingBalance) * 100 : 0
@@ -112,10 +130,19 @@ function StrategySummary({
     <Panel label="Strategy" extra={enabled ? 'Price Action Beta' : 'OFF'}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {hasOpenWithLevels && open && (
-          <LiveTradeCard open={open} markPrice={markPrice} unrealizedPnl={stats.unrealizedPnl} />
+          <LiveTradeCard
+            open={open}
+            markPrice={markPrice}
+            unrealizedPnl={stats.unrealizedPnl}
+            onZoom={
+              markTime !== null
+                ? () => onZoomToTrade(open.entryTime as number, markTime)
+                : undefined
+            }
+          />
         )}
 
-        {/* one-line summary: closed count · W/L */}
+        {/* one-line summary: closed count · W/L · winrate */}
         <div
           style={{
             display: 'flex',
@@ -134,6 +161,14 @@ function StrategySummary({
               <span style={{ color: theme.up }}>{stats.wins}W</span>
               <span style={{ color: theme.textInactive }}>/</span>
               <span style={{ color: theme.down }}>{stats.losses}L</span>
+              {stats.winRate !== null && (
+                <>
+                  <span style={{ color: theme.textInactive }}>·</span>
+                  <span style={{ color: theme.text }}>
+                    {(stats.winRate * 100).toFixed(0)}% win
+                  </span>
+                </>
+              )}
             </>
           )}
         </div>
@@ -158,10 +193,36 @@ function StrategySummary({
           </span>
         </div>
 
+        {/* max drawdown */}
+        {stats.totalTrades > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: 10,
+              fontFamily: fonts.mono,
+              fontSize: 11,
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            <span style={{ color: theme.textInactive }}>max DD</span>
+            <span style={{ color: stats.maxDrawdown > 0 ? theme.down : theme.textInactive }}>
+              {stats.maxDrawdown > 0
+                ? `−${formatMoney(stats.maxDrawdown)}`
+                : '$0.00'}
+            </span>
+            {startingBalance > 0 && stats.maxDrawdown > 0 && (
+              <span style={{ color: theme.textInactive }}>
+                ({((stats.maxDrawdown / startingBalance) * 100).toFixed(1)}%)
+              </span>
+            )}
+          </div>
+        )}
+
         {stats.closedTrades.length > 0 && (
           <>
             <Hairline />
-            <ClosedTradesList trades={stats.closedTrades} />
+            <ClosedTradesList trades={stats.closedTrades} onZoomToTrade={onZoomToTrade} />
           </>
         )}
 
@@ -199,10 +260,12 @@ function LiveTradeCard({
   open,
   markPrice,
   unrealizedPnl,
+  onZoom,
 }: {
   open: NonNullable<StrategyStats['openTrade']>
   markPrice: number | null
   unrealizedPnl: number
+  onZoom?: () => void
 }) {
   // open.sl / open.tp are guaranteed by the caller (`hasOpenWithLevels`),
   // but TS doesn't carry that narrowing across the prop boundary.
@@ -220,6 +283,8 @@ function LiveTradeCard({
 
   return (
     <div
+      onClick={onZoom}
+      title={onZoom ? 'Zoom to live trade' : undefined}
       style={{
         display: 'flex',
         flexDirection: 'column',
@@ -231,7 +296,11 @@ function LiveTradeCard({
         fontFamily: fonts.mono,
         fontSize: 11,
         fontVariantNumeric: 'tabular-nums',
+        cursor: onZoom ? 'pointer' : 'default',
+        transition: 'background 120ms',
       }}
+      onMouseEnter={(e) => { if (onZoom) e.currentTarget.style.background = theme.surface }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = theme.bg }}
     >
       {/* header: LIVE pill · label · side · channel */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -292,7 +361,13 @@ function LiveRow({
   )
 }
 
-function ClosedTradesList({ trades }: { trades: ReadonlyArray<ClosedTrade> }) {
+function ClosedTradesList({
+  trades,
+  onZoomToTrade,
+}: {
+  trades: ReadonlyArray<ClosedTrade>
+  onZoomToTrade: (from: number, to: number) => void
+}) {
   // Newest at the top — easier to spot most recent trade.
   const reversed = [...trades].reverse()
   return (
@@ -310,13 +385,17 @@ function ClosedTradesList({ trades }: { trades: ReadonlyArray<ClosedTrade> }) {
         Closed ({trades.length})
       </div>
       {reversed.map((t) => (
-        <ClosedTradeRow key={`${t.entryTime}-${t.exitTime}`} trade={t} />
+        <ClosedTradeRow
+          key={`${t.entryTime}-${t.exitTime}`}
+          trade={t}
+          onZoom={() => onZoomToTrade(t.entryTime as number, t.exitTime as number)}
+        />
       ))}
     </div>
   )
 }
 
-function ClosedTradeRow({ trade }: { trade: ClosedTrade }) {
+function ClosedTradeRow({ trade, onZoom }: { trade: ClosedTrade; onZoom: () => void }) {
   const isWin = trade.pnl > 0
   const rText =
     trade.rMultiple !== undefined && Number.isFinite(trade.rMultiple)
@@ -325,16 +404,29 @@ function ClosedTradeRow({ trade }: { trade: ClosedTrade }) {
   const durMin = Math.max(0, Math.round(((trade.exitTime as number) - (trade.entryTime as number)) / 60))
   const reasonText = trade.reason ?? '—'
   return (
-    <div
+    <button
+      onClick={onZoom}
+      title="Zoom to trade"
       style={{
+        appearance: 'none',
+        background: 'transparent',
+        border: 'none',
         display: 'flex',
         alignItems: 'baseline',
         gap: 6,
+        padding: '3px 4px',
         fontFamily: fonts.mono,
         fontSize: 10,
         fontVariantNumeric: 'tabular-nums',
         color: theme.text,
+        cursor: 'pointer',
+        textAlign: 'left',
+        borderRadius: 4,
+        transition: 'background 120ms',
+        width: '100%',
       }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = theme.surface }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
     >
       <span style={{ minWidth: 44 }}>{trade.label ?? '—'}</span>
       {rText && (
@@ -342,13 +434,22 @@ function ClosedTradeRow({ trade }: { trade: ClosedTrade }) {
           {rText}
         </span>
       )}
+      <span
+        style={{
+          color: isWin ? theme.up : trade.pnl < 0 ? theme.down : theme.textInactive,
+          minWidth: 52,
+          fontWeight: 500,
+        }}
+      >
+        {formatSignedMoney(trade.pnl)}
+      </span>
       {trade.channelLabel && (
         <span style={{ color: theme.textInactive, minWidth: 28 }}>{trade.channelLabel}</span>
       )}
       <span style={{ color: theme.textInactive }}>{reasonText}</span>
       <span style={{ flex: 1 }} />
       <span style={{ color: theme.textInactive }}>{durMin}m</span>
-    </div>
+    </button>
   )
 }
 
@@ -853,6 +954,105 @@ function Notes({ timeframe }: { timeframe: Timeframe }) {
         }}
       />
     </Panel>
+  )
+}
+
+// ---------- Settings ----------
+// Sandbox-wide chart settings. Right now: just zoom sensitivity. The live
+// value is mirrored into a ref in the sandbox so the wheel handler picks it
+// up immediately without re-creating the chart. Persisted to localStorage
+// in the sandbox under `xau:zoom-sensitivity`.
+function SettingsSection({
+  zoomSensitivity,
+  onZoomSensitivityChange,
+}: {
+  zoomSensitivity: number
+  onZoomSensitivityChange: (n: number) => void
+}) {
+  return (
+    <Panel label="Settings">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <SliderRow
+          label="ZOOM SENSITIVITY"
+          value={zoomSensitivity}
+          min={1.1}
+          max={2.5}
+          step={0.05}
+          precision={2}
+          suffix="×"
+          onChange={onZoomSensitivityChange}
+          hint="per mouse-wheel notch · 1.10 ≈ default LWC · 1.40 default · 2.50 aggressive"
+        />
+      </div>
+    </Panel>
+  )
+}
+
+function SliderRow({
+  label,
+  value,
+  min,
+  max,
+  step,
+  precision,
+  suffix,
+  hint,
+  onChange,
+}: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  precision: number
+  suffix?: string
+  hint?: string
+  onChange: (n: number) => void
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+        <span style={{ flex: 1, color: theme.textInactive, fontSize: 10, letterSpacing: 0.5 }}>
+          {label}
+        </span>
+        <span
+          style={{
+            fontFamily: fonts.mono,
+            fontSize: 11,
+            color: theme.text,
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          {value.toFixed(precision)}
+          {suffix}
+        </span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        style={{
+          width: '100%',
+          accentColor: theme.accent,
+          cursor: 'pointer',
+        }}
+      />
+      {hint && (
+        <span
+          style={{
+            fontFamily: fonts.mono,
+            fontSize: 9,
+            color: theme.textInactive,
+            lineHeight: 1.4,
+          }}
+        >
+          {hint}
+        </span>
+      )}
+    </div>
   )
 }
 

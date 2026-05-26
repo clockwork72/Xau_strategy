@@ -45,6 +45,9 @@ export interface StrategyStats {
   avgWin: number
   avgLoss: number
   equity: number
+  // Peak-to-trough drawdown in dollars, computed over the realized equity
+  // curve plus the current MTM of any open trade. Always ≥ 0.
+  maxDrawdown: number
 }
 
 function pnlOnClose(side: TradeSide, entry: number, exit: number, lotSize: number): number {
@@ -149,8 +152,15 @@ export function computeStats(
   let losses = 0
   let sumWin = 0
   let sumLoss = 0
+  let peakEquity = startingBalance
+  let runningEquity = startingBalance
+  let maxDrawdown = 0
   for (const t of closedTrades) {
     realizedPnl += t.pnl
+    runningEquity += t.pnl
+    if (runningEquity > peakEquity) peakEquity = runningEquity
+    const dd = peakEquity - runningEquity
+    if (dd > maxDrawdown) maxDrawdown = dd
     if (t.pnl > 0) {
       wins += 1
       sumWin += t.pnl
@@ -163,6 +173,12 @@ export function computeStats(
   let unrealizedPnl = 0
   if (openTrade && markPrice !== null) {
     unrealizedPnl = pnlOnClose(openTrade.side, openTrade.entryPrice, markPrice, lotSize)
+    // Fold the current MTM into the DD curve — a deeply-underwater open
+    // trade is real drawdown even though it isn't realized yet.
+    const mtmEquity = runningEquity + unrealizedPnl
+    if (mtmEquity > peakEquity) peakEquity = mtmEquity
+    const ddNow = peakEquity - mtmEquity
+    if (ddNow > maxDrawdown) maxDrawdown = ddNow
   }
 
   const totalTrades = closedTrades.length
@@ -183,5 +199,6 @@ export function computeStats(
     avgWin,
     avgLoss,
     equity,
+    maxDrawdown,
   }
 }

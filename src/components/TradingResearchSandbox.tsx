@@ -59,6 +59,15 @@ const DEFAULT_RANGE = {
 // candidates for the scoring algorithm; trades responsiveness for noise.
 const TRENDLINE_LOOKBACK = 7
 
+// Mouse-wheel zoom factor per notch. LWC v4's built-in is ~1.1× (slow);
+// 1.4× makes one notch roughly 4× more responsive without scrolling the
+// chart away in one flick. User-tunable via the Settings panel — the live
+// value is read from zoomSensitivityRef inside the wheel handler.
+const DEFAULT_ZOOM_SENSITIVITY = 1.4
+const ZOOM_SENSITIVITY_LS_KEY = 'xau:zoom-sensitivity'
+const ZOOM_SENSITIVITY_MIN = 1.05
+const ZOOM_SENSITIVITY_MAX = 3.0
+
 import TopBar from './TopBar'
 import LeftNav from './LeftNav'
 import RightPanels from './RightPanels'
@@ -189,6 +198,26 @@ export default function TradingResearchSandbox() {
   // Force SessionOverlay to remount/re-read refs once charts exist.
   const [chartsReady, setChartsReady] = useState(false)
 
+  // ---------- chart settings (persisted to localStorage) ----------
+  // Mouse-wheel zoom factor per notch. Read via zoomSensitivityRef in the
+  // wheel handler (defined once at mount) so changes apply without re-
+  // creating the chart.
+  const [zoomSensitivity, setZoomSensitivity] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem(ZOOM_SENSITIVITY_LS_KEY)
+      if (stored !== null) {
+        const n = parseFloat(stored)
+        if (Number.isFinite(n) && n >= ZOOM_SENSITIVITY_MIN && n <= ZOOM_SENSITIVITY_MAX) return n
+      }
+    } catch { /* ignore */ }
+    return DEFAULT_ZOOM_SENSITIVITY
+  })
+  const zoomSensitivityRef = useRef(zoomSensitivity)
+  useEffect(() => {
+    zoomSensitivityRef.current = zoomSensitivity
+    try { localStorage.setItem(ZOOM_SENSITIVITY_LS_KEY, String(zoomSensitivity)) } catch { /* ignore */ }
+  }, [zoomSensitivity])
+
   // ---------- replay ----------
   const {
     replayWindow,
@@ -276,7 +305,14 @@ export default function TradingResearchSandbox() {
         },
       },
       handleScroll: true,
-      handleScale: true,
+      // Disable LWC's built-in wheel zoom — we re-implement below with a
+      // tunable factor (WHEEL_ZOOM_FACTOR) and cursor-anchored pivot.
+      handleScale: {
+        axisPressedMouseMove: { time: true, price: true },
+        axisDoubleClickReset: { time: true, price: true },
+        mouseWheel: false,
+        pinch: true,
+      },
     }
 
     const priceChart = createChart(priceContainerRef.current, {
@@ -510,6 +546,36 @@ export default function TradingResearchSandbox() {
     priceChart.subscribeClick(onPriceClick)
     cvdChart.subscribeClick(onCvdClick)
 
+    // ----- custom wheel zoom (higher sensitivity, cursor-anchored) -----
+    // LWC's built-in wheel zoom is disabled above. We attach a wheel listener
+    // on each chart container so the zoom factor is tunable and the bar
+    // under the cursor stays put across zooms. The visibleLogicalRange sync
+    // wired below mirrors zoom between price ↔ CVD.
+    const priceContainerEl = priceContainerRef.current
+    const cvdContainerEl = cvdContainerRef.current
+    const makeWheelZoom = (chart: IChartApi, container: HTMLElement) => (e: WheelEvent) => {
+      // Let LWC handle horizontal scroll (shift+wheel or trackpad deltaX).
+      if (e.shiftKey || (e.deltaX !== 0 && e.deltaY === 0)) return
+      e.preventDefault()
+      const ts = chart.timeScale()
+      const range = ts.getVisibleLogicalRange()
+      if (!range) return
+      const rect = container.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const pivot = ts.coordinateToLogical(x)
+      if (pivot === null) return
+      const s = zoomSensitivityRef.current
+      const factor = e.deltaY > 0 ? s : 1 / s
+      ts.setVisibleLogicalRange({
+        from: pivot - (pivot - range.from) * factor,
+        to: pivot + (range.to - pivot) * factor,
+      })
+    }
+    const onPriceWheel = makeWheelZoom(priceChart, priceContainerEl)
+    const onCvdWheel = makeWheelZoom(cvdChart, cvdContainerEl)
+    priceContainerEl.addEventListener('wheel', onPriceWheel, { passive: false })
+    cvdContainerEl.addEventListener('wheel', onCvdWheel, { passive: false })
+
     const ro = new ResizeObserver(() => {
       if (priceContainerRef.current) {
         priceChart.applyOptions({
@@ -529,6 +595,8 @@ export default function TradingResearchSandbox() {
 
     return () => {
       ro.disconnect()
+      priceContainerEl.removeEventListener('wheel', onPriceWheel)
+      cvdContainerEl.removeEventListener('wheel', onCvdWheel)
       priceChart.timeScale().unsubscribeVisibleLogicalRangeChange(onPriceRange)
       cvdChart.timeScale().unsubscribeVisibleLogicalRangeChange(onCvdRange)
       priceChart.unsubscribeCrosshairMove(syncFromPrice)
@@ -1121,6 +1189,7 @@ export default function TradingResearchSandbox() {
 
   // ---------- Strategy stats (winrate, PnL, equity, open position) ----------
   const markPrice = visibleCandles.length > 0 ? visibleCandles[visibleCandles.length - 1].close : null
+  const markTime = visibleCandles.length > 0 ? (visibleCandles[visibleCandles.length - 1].time as number) : null
   const strategyStats = useMemo(
     () => computeStats(signals, lotSize, startingBalance, markPrice),
     [signals, lotSize, startingBalance, markPrice],
@@ -1303,6 +1372,26 @@ export default function TradingResearchSandbox() {
   }, [active, appliedRange, chartsReady])
 
   // ---------- handlers ----------
+  // Click-to-zoom on a trade row in the Strategy panel. Pads ~40% of the
+  // trade span on each side (min 5 min) so entry/exit candles aren't jammed
+  // against the chart edges. Logical-range sync mirrors the zoom to CVD.
+  const handleZoomToTrade = (rawFrom: number, rawTo: number) => {
+    const chart = priceChartRef.current
+    if (!chart) return
+    const from = Math.min(rawFrom, rawTo)
+    const to = Math.max(rawFrom, rawTo)
+    const span = Math.max(60, to - from)
+    const pad = Math.max(span * 0.4, 300)
+    chart.timeScale().setVisibleRange({
+      from: (from - pad) as Time,
+      to: (to + pad) as Time,
+    })
+    // eslint-disable-next-line no-console
+    console.log(
+      `[chart] zoom to trade ${formatCrosshair(from)} → ${formatCrosshair(to)} (pad ${Math.round(pad)}s)`,
+    )
+  }
+
   const handleRangeJump = (fromSec: number, toSec: number) => {
     setAppliedRange({ from: fromSec, to: toSec })
     const chart = priceChartRef.current
@@ -1436,6 +1525,10 @@ export default function TradingResearchSandbox() {
           startingBalance={startingBalance}
           onStartingBalanceChange={setStartingBalance}
           markPrice={markPrice}
+          markTime={markTime}
+          onZoomToTrade={handleZoomToTrade}
+          zoomSensitivity={zoomSensitivity}
+          onZoomSensitivityChange={setZoomSensitivity}
           channelsMeta={channelsMeta}
           showResistance={showResistance}
           showSupport={showSupport}
