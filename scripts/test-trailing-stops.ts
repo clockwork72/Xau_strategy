@@ -50,7 +50,7 @@ const NY_FMT = new Intl.DateTimeFormat('en-US', {
 function isBrokerClosed(timeSec: number): boolean {
   const parts = NY_FMT.formatToParts(new Date(timeSec * 1000))
   const dow = parts.find((p) => p.type === 'weekday')?.value ?? ''
-  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0')
+  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0') % 24
   if (hour === 17) return true
   if (dow === 'Fri' && hour > 17) return true
   if (dow === 'Sat') return true

@@ -90,7 +90,12 @@ const NY_DOW_HOUR_FMT = new Intl.DateTimeFormat('en-US', {
 function isBrokerClosed(timeSec: number): boolean {
   const parts = NY_DOW_HOUR_FMT.formatToParts(new Date(timeSec * 1000))
   const dow = parts.find((p) => p.type === 'weekday')?.value ?? ''
-  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0')
+  // Some Intl implementations (e.g. Node 20) return "24" for midnight under
+  // en-US + hour12:false; Chromium returns "00". Mod 24 normalizes both so
+  // bars at NY 00:00 (= midnight) aren't accidentally classified as "Fri
+  // after 17" and dropped. Affects Casa 05:00-05:55 May 22, which contains
+  // the S4 channel-break confirmation.
+  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0') % 24
   if (hour === 17) return true
   if (dow === 'Fri' && hour > 17) return true
   if (dow === 'Sat') return true

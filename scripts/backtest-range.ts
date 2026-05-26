@@ -37,6 +37,8 @@ const RANGE_START_CASA = '2026-05-20 00:00'
 const RANGE_END_CASA = '2026-05-26 15:00'
 // Override with env XAU_SL_MODE=channel-frac to backtest v2 (else v1).
 const SL_MODE: SlMode = process.env.XAU_SL_MODE === 'channel-frac' ? 'channel-frac' : 'wick'
+// Override with env XAU_RED_ONLY=true to require red entry candles.
+const RED_ONLY = process.env.XAU_RED_ONLY === 'true'
 const TRENDLINE_LOOKBACK = 7
 const LOT_SIZE = 0.01 // mirror app default; 1 oz exposure
 const CONTRACT_SIZE_OZ = 100
@@ -53,7 +55,7 @@ const NY_FMT = new Intl.DateTimeFormat('en-US', {
 function isBrokerClosed(timeSec: number): boolean {
   const parts = NY_FMT.formatToParts(new Date(timeSec * 1000))
   const dow = parts.find((p) => p.type === 'weekday')?.value ?? ''
-  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0')
+  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0') % 24
   if (hour === 17) return true
   if (dow === 'Fri' && hour > 17) return true
   if (dow === 'Sat') return true
@@ -118,7 +120,7 @@ function main() {
     `Loaded ${allCandles.length} M5 bars total · replay window ${replay.length} bars\n`,
   )
   process.stdout.write(
-    `Range: ${formatCrosshair(fromSec)} → ${formatCrosshair(toSec)} CASA · SL mode: ${SL_MODE === 'channel-frac' ? 'v2 (channel ¼H)' : 'v1 (wick)'}\n\n`,
+    `Range: ${formatCrosshair(fromSec)} → ${formatCrosshair(toSec)} CASA · SL: ${SL_MODE === 'channel-frac' ? 'v2 (channel ¼H)' : 'v1 (wick)'} · entry: ${RED_ONLY ? 'red only' : 'any wick rejection'}\n\n`,
   )
 
   let pabState: PABState = PAB_INITIAL_STATE
@@ -179,7 +181,7 @@ function main() {
         })
       }
 
-      pabState = runPriceActionBeta(algoCandles, liveChannels, emaByTime, pabState, SL_MODE)
+      pabState = runPriceActionBeta(algoCandles, liveChannels, emaByTime, pabState, SL_MODE, RED_ONLY)
     }
   })
 
