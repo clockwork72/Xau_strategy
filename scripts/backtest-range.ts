@@ -19,6 +19,8 @@ import {
   pickChannels,
   findChannelBreak,
   channelSignature,
+  emaOutsideRailsFrac,
+  EMA_OUTSIDE_MAX_FRAC,
   TOUCH_PCT,
   type ChannelMeta,
 } from '../src/engine/trendlines'
@@ -26,12 +28,15 @@ import {
   runPriceActionBeta,
   PAB_INITIAL_STATE,
   type PABState,
+  type SlMode,
 } from '../src/engine/priceActionBeta'
 import type { Candle } from '../src/types'
 import type { Signal } from '../src/engine/strategy'
 
-const RANGE_START_CASA = '2026-05-21 00:00'
-const RANGE_END_CASA = '2026-05-26 15:20'
+const RANGE_START_CASA = '2026-05-20 00:00'
+const RANGE_END_CASA = '2026-05-26 15:00'
+// Override with env XAU_SL_MODE=channel-frac to backtest v2 (else v1).
+const SL_MODE: SlMode = process.env.XAU_SL_MODE === 'channel-frac' ? 'channel-frac' : 'wick'
 const TRENDLINE_LOOKBACK = 7
 const LOT_SIZE = 0.01 // mirror app default; 1 oz exposure
 const CONTRACT_SIZE_OZ = 100
@@ -113,7 +118,7 @@ function main() {
     `Loaded ${allCandles.length} M5 bars total · replay window ${replay.length} bars\n`,
   )
   process.stdout.write(
-    `Range: ${formatCrosshair(fromSec)} → ${formatCrosshair(toSec)} CASA\n\n`,
+    `Range: ${formatCrosshair(fromSec)} → ${formatCrosshair(toSec)} CASA · SL mode: ${SL_MODE === 'channel-frac' ? 'v2 (channel ¼H)' : 'v1 (wick)'}\n\n`,
   )
 
   let pabState: PABState = PAB_INITIAL_STATE
@@ -144,6 +149,9 @@ function main() {
       const midPrice = algoCandles[Math.floor(algoCandles.length / 2)].close
       const eps = midPrice * TOUCH_PCT
 
+      const emaByTime = new Map<number, number>()
+      for (const p of computeEma(algoCandles, 21)) emaByTime.set(p.time, p.value)
+
       const seen = new Set<string>()
       const liveChannels: ChannelMeta[] = []
       for (const ch of rawChannels) {
@@ -151,6 +159,8 @@ function main() {
         if (seen.has(identity)) continue
         seen.add(identity)
         if (frozenIdentities.has(identity)) continue
+        const outsideFrac = emaOutsideRailsFrac(ch, algoCandles, emaByTime)
+        if (!Number.isNaN(outsideFrac) && outsideFrac > EMA_OUTSIDE_MAX_FRAC) continue
         if (findChannelBreak(ch, algoCandles, eps) !== null) {
           frozenIdentities.add(identity)
           continue
@@ -169,10 +179,7 @@ function main() {
         })
       }
 
-      const emaByTime = new Map<number, number>()
-      for (const p of computeEma(algoCandles, 21)) emaByTime.set(p.time, p.value)
-
-      pabState = runPriceActionBeta(algoCandles, liveChannels, emaByTime, pabState)
+      pabState = runPriceActionBeta(algoCandles, liveChannels, emaByTime, pabState, SL_MODE)
     }
   })
 

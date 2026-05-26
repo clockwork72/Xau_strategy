@@ -36,8 +36,9 @@ interface TradeSpec {
 }
 
 const TRADES: TradeSpec[] = [
-  { label: 'PAB-8', entryCasa: '2026-05-25 08:10', exitCasa: '2026-05-25 10:35', expEntry: 4560.79, expSL: 4565.43 },
-  { label: 'PAB-9', entryCasa: '2026-05-26 06:35', exitCasa: '2026-05-26 07:25', expEntry: 4532.59, expSL: 4536.15 },
+  // Range 2026-05-20 00:00 → 2026-05-26 15:00 CASA, M5, BE@1R + EMA filter active
+  { label: 'PAB-4 (winner, +3R)', entryCasa: '2026-05-25 05:55', exitCasa: '2026-05-25 06:20', expEntry: 4564.88, expSL: 4566.66 },
+  { label: 'PAB-5 (BE-scratch)',  entryCasa: '2026-05-25 08:10', exitCasa: '2026-05-25 08:30', expEntry: 4560.79, expSL: 4565.43 },
 ]
 
 const NY_FMT = new Intl.DateTimeFormat('en-US', {

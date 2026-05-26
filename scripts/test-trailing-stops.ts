@@ -20,6 +20,8 @@ import {
   pickChannels,
   findChannelBreak,
   channelSignature,
+  emaOutsideRailsFrac,
+  EMA_OUTSIDE_MAX_FRAC,
   TOUCH_PCT,
   type ChannelMeta,
 } from '../src/engine/trendlines'
@@ -133,6 +135,8 @@ function extractEntries(all: Candle[], fromSec: number, toSec: number): Entry[] 
       const rawChannels = pickChannels(swingLows, algoCandles, 'support')
       const mid = algoCandles[Math.floor(algoCandles.length / 2)].close
       const eps = mid * TOUCH_PCT
+      const emaByTime = new Map<number, number>()
+      for (const p of computeEma(algoCandles, 21)) emaByTime.set(p.time, p.value)
       const seen = new Set<string>()
       const liveChannels: ChannelMeta[] = []
       for (const ch of rawChannels) {
@@ -140,6 +144,8 @@ function extractEntries(all: Candle[], fromSec: number, toSec: number): Entry[] 
         if (seen.has(identity)) continue
         seen.add(identity)
         if (frozenIdentities.has(identity)) continue
+        const outsideFrac = emaOutsideRailsFrac(ch, algoCandles, emaByTime)
+        if (!Number.isNaN(outsideFrac) && outsideFrac > EMA_OUTSIDE_MAX_FRAC) continue
         if (findChannelBreak(ch, algoCandles, eps) !== null) {
           frozenIdentities.add(identity)
           continue
@@ -152,8 +158,6 @@ function extractEntries(all: Candle[], fromSec: number, toSec: number): Entry[] 
         }
         liveChannels.push({ channel: ch, sig: channelSignature(ch), label, status: 'live' })
       }
-      const emaByTime = new Map<number, number>()
-      for (const p of computeEma(algoCandles, 21)) emaByTime.set(p.time, p.value)
       pabState = runPriceActionBeta(algoCandles, liveChannels, emaByTime, pabState)
     }
   })
