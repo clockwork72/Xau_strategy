@@ -112,6 +112,7 @@ export function runPriceActionBeta(
   ema21ByTime: Map<number, number>,
   prevState: PABState,
   slMode: SlMode = 'wick',
+  redCandleOnly = false,
 ): PABState {
   if (candles.length === 0) return PAB_INITIAL_STATE
 
@@ -209,7 +210,12 @@ export function runPriceActionBeta(
     const bar = playheadBar
     const t = playheadTime
     const ema = ema21ByTime.get(t)
-    if (ema !== undefined && bar.close > ema && isUpperWickRejection(bar)) {
+    if (
+      ema !== undefined &&
+      bar.close > ema &&
+      isUpperWickRejection(bar) &&
+      (!redCandleOnly || bar.close < bar.open)
+    ) {
       for (const meta of liveSupportChannels) {
         if (t < meta.channel.startTime) continue
         const extended = extendChannelToTime(meta.channel, t)
