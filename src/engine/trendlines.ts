@@ -256,3 +256,45 @@ export function pickChannels(
 
   return accepted
 }
+
+/**
+ * Channel-quality gate: reject channels where EMA21 spends more than this
+ * fraction of bars (within startTime → endTime) OUTSIDE the rails. A
+ * channel disconnected from the medium-term trend has EMA21 hugging or
+ * breaching a rail. On the 2026-05-21→26 sample, S6 (the bad channel the
+ * user flagged) had 45% of bars with EMA outside; every "good" channel
+ * came in ≤ 2%. 20% is a comfortable cutoff between the two regimes.
+ * Set to 1.0 to disable the filter entirely.
+ */
+export const EMA_OUTSIDE_MAX_FRAC = 0.20
+
+/**
+ * Fraction of bars within [c.startTime, c.endTime] where EMA21 sits
+ * strictly outside the channel rails (above upper or below lower).
+ * Returns NaN when no bar in the lifespan has an EMA value (e.g.
+ * channel sits inside the EMA's seed window) — caller should treat NaN
+ * as "quality unknown" and keep the channel.
+ */
+export function emaOutsideRailsFrac(
+  c: Channel,
+  candles: ReadonlyArray<Candle>,
+  emaByTime: ReadonlyMap<number, number>,
+): number {
+  const dt = c.endTime - c.startTime
+  if (dt <= 0) return NaN
+  const slopeU = (c.upperEnd - c.upperStart) / dt
+  const slopeL = (c.lowerEnd - c.lowerStart) / dt
+  let total = 0
+  let outside = 0
+  for (const bar of candles) {
+    const t = bar.time as number
+    if (t < c.startTime || t > c.endTime) continue
+    const ema = emaByTime.get(t)
+    if (ema === undefined) continue
+    total++
+    const u = c.upperStart + slopeU * (t - c.startTime)
+    const l = c.lowerStart + slopeL * (t - c.startTime)
+    if (ema > u || ema < l) outside++
+  }
+  return total > 0 ? outside / total : NaN
+}
