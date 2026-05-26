@@ -25,3 +25,9 @@ session.log
 # Local agent / harness state (not part of the project)
 .agents/
 skills-lock.json
+
+# Local-only Playwright verification scripts (per HANDOFF §2)
+_design/
+
+# TS incremental build cache
+*.tsbuildinfo
