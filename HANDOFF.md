@@ -39,7 +39,7 @@ Xau_Algo/
 │   ├── types.ts                          # Candle, CvdCandle, Timeframe, DatasetBundle
 │   ├── types/electron.d.ts               # window.electronAPI typing
 │   ├── data.ts                           # CSV loader; sign-based CVD with 17 NY anchor + M5 drilldown into M1
-│   ├── util/time.ts                      # Casa formatters + parseCasaLocalToUtcSec
+│   ├── util/time.ts                      # Casa formatters + parseCasaLocalToUtcSec + casaSessionStartAtOrBefore (22:00 Casa anchor)
 │   ├── hooks/
 │   │   ├── useReplayController.ts        # replay window, playhead state, tick interval, keyboard, [replay] logs, findIndexForTime
 │   │   ├── useDatasets.ts                # CSV load + timeframe + active selector + load status + dataBounds (for range validation)
@@ -62,6 +62,15 @@ Xau_Algo/
 │       ├── SegmentedToggle.tsx           # sliding-indicator pill
 │       ├── SessionOverlay.tsx            # session boxes on price pane
 │       └── DrawToolbar.tsx               # floating vertical toolbar over chart (cursor/trendline/horizontal/snap/clear)
+├── _design/                              # local-only Playwright verification scripts (gitignored)
+│   ├── baseline-screenshot.cjs           # opens localhost:5173, screenshots default state
+│   ├── inspect-dom.cjs                   # dumps buttons/inputs + their bounding boxes — selector discovery
+│   ├── see-5m-support.cjs                # 5m TF, capture start + end states
+│   ├── see-at-time.cjs                   # scrub playhead to specific bars, screenshot each
+│   ├── see-2day-range.cjs                # load 2-day range, screenshot at chosen bars
+│   ├── see-support-only.cjs              # 1-day vs 2-day comparison with resistance toggled off
+│   ├── verify-2day-pab1.cjs              # binary-searches the 2-day bar matching 10:30, screenshots
+│   └── screenshots/                      # PNG output Claude reads back via the Read tool
 ├── docs/superpowers/                     # design artifacts
 │   ├── specs/
 │   │   ├── 2026-05-24-trending-channels-v2-design.md       # v2 channel experiment (reverted but preserved — see §10)
@@ -143,6 +152,24 @@ Time anchor: `replayPlayheadTime` (UTC seconds), NOT an index. Index `replayPlay
 ### Range picker — bounds-validated (NEW)
 `LeftNav` RangePicker receives `dataBounds` from `useDatasets`. Apply is disabled and a red "outside data range" warning shows when either start or end falls outside `[dataBounds.from, dataBounds.to]`. A hint line `data: <first bar> → <last bar>` is always visible. Prevents the previous silent failure where requesting a range past the data end produced an empty `replayWindow` and a stale-looking chart.
 
+### Algorithm window — `algoCandles` (session-anchored, range-independent)
+The data the **algorithm** sees is decoupled from the data the chart **renders**. Two derived candle slices:
+
+- `visibleCandles` — what the chart shows. Drives candle setData, EMA overlay setData, CVD, draw tool, marker rendering, the per-trade visualization line series. Range-restricted: bars in `active.candles ∩ appliedRange ∩ [0, playhead]`.
+- `algoCandles` — what the algorithm sees. Drives the channel detector (`pickChannels` + `findChannelBreak`), the strategy's `EMA(21)` lookup, the strategy entry/exit evaluation. **Pulled from the FULL dataset**, restricted to `[casaSessionStartAtOrBefore(playhead), playhead]`. Independent of the loaded range.
+
+**Session anchor** = `22:00 Casa local` (= NY close / Asia open on the FX day clock). DST-safe via `casaOffsetMinutesAt` in `util/time.ts`. The "session day" runs from one 22:00 Casa to the next.
+
+**Why this exists:** without it, loading a wider date range changed which channels `pickChannels`'s touch-scoring picked as winners, which broke trade reproducibility ("PAB-1 fires on the 1-day load but not on the 2-day load even though the playhead time is the same"). With session-anchored `algoCandles`, the algorithm at any playhead T sees bars in `[T's session-start, T]` — same input regardless of how much history is loaded → same channels → same trades.
+
+**No look-ahead.** All bars in `algoCandles` satisfy `time ≤ playhead`. The strategy still only evaluates entries on the playhead bar; exits scan past bars (pure price data, no channel knowledge).
+
+**Two parallel swing sets** (in `TradingResearchSandbox.tsx`):
+- `drawSwings` — on `visibleCandles`, for the draw-tool snap targeting visible pivots.
+- `algoSwings` — on `algoCandles`, for channel detection.
+
+**Visual side-effect to be aware of:** when the loaded range starts at e.g. `21-00:00` but the session anchor is `20-22:00`, the algorithm uses ~2h of pre-range data. Channels detected with anchors in that pre-range window will visually appear to start at the left edge of the chart (the off-range anchor is invisible). This is acceptable for normal full-session loads. Sub-session loads (e.g. `21-10:00 → 20:00`) get the same algorithmic behavior since `algoCandles` is pulled from the dataset, not the loaded range.
+
 ### Trendline channels — detection + lifecycle
 
 **Detection** (`engine/trendlines.ts:pickChannels`)
@@ -208,23 +235,28 @@ runPriceActionBeta(
 
 **Critical: NO LOOK-AHEAD**. Entries are evaluated ONLY on the playhead bar (the last bar in `candles`). Historical bars are never re-evaluated for entries — at the time those bars were the playhead, the strategy already had its chance. This eliminates the classic backtest bias where historical bars would be evaluated using channels-as-known-now (which didn't exist yet at that historical time).
 
+**Critical: RANGE-INDEPENDENT**. The caller passes `algoCandles` (session-anchored slice of the full dataset — see "Algorithm window" above), not `visibleCandles`. So the strategy's input at any playhead time T is identical regardless of which range the user loaded. Same playhead → same channels → same trade.
+
 Exits scan forward from `open.entryTime` up to the playhead, using ONLY price data (`bar.high` vs SL, `bar.low` vs TP). Pure price — no channels — so scanning over skipped bars (e.g. user scrubbed forward) introduces no bias.
 
 **PABState** (sandbox holds in a ref):
 ```ts
-{ signals: Signal[], open: OpenShort | null, tradeCount: number, lastProcessedTime: number }
+{ signals: Signal[], lastProcessedTime: number }
 ```
+**Signals are the single source of truth.** The open trade and the running `tradeCount` are **derived fresh from signals** on every call — never stored separately. This makes backward-scrub pruning automatically clean up both derived values (fixes ID inflation and phantom-trade bugs from a prior design that stored them).
+
 - Idempotent — repeated calls with the same playhead return the same state.
-- Backward scrub — signals with `time > playhead` are pruned; an open trade with `entryTime > playhead` is dropped.
+- Backward scrub — signals with `time > playhead` are pruned; `open` is recomputed from the pruned signals (the trailing unmatched `sell` with full metadata becomes the open trade, or `null`).
 - Reset on TF / range / dataset / strategy-toggle change (`pabSettingsKeyRef` mirrors the channels tracker pattern).
 
-**Output**: `state.signals` is the existing `Signal[]` shape — alternating `sell` (entry at close) + `buy` (synthetic exit at SL or TP). The existing `computeStats` in `portfolio.ts` pairs them into closed trades — no portfolio-model changes required.
+**Output**: `state.signals` is the existing `Signal[]` shape — alternating `sell` (entry at close) + `buy` (synthetic exit at SL or TP). Entries carry `sl`, `tp`, `channelLabel` metadata; exits carry `reason: 'stop' | 'target'`. `computeStats` in `portfolio.ts` pairs them **by label** (not by alternation) — see Portfolio below.
 
 **Constants** (file-level in `priceActionBeta.ts`, no UI knob in v1):
 - `STOP_BUFFER_PCT = 0.0002` (~$0.90 on $4500 gold above entry-bar high)
 - `RR = 3` (fixed 1:3)
 - Proximity threshold = `TOUCH_PCT = 0.0006` (imported from trendlines.ts)
 - EMA length = 21
+- `MIN_BODY_TO_RANGE = 0.15` — doji filter on the entry candle (body must be ≥ 15% of total candle range; rejects dojis + spinning tops where `upper_wick > body` is trivially satisfied)
 
 **Same-bar SL+TP collision**: stop wins (pessimistic).
 
@@ -232,7 +264,25 @@ Exits scan forward from `open.entryTime` up to the playhead, using ONLY price da
 
 ### Portfolio
 - `computeStats(signals, lotSize, balance, markPrice) → StrategyStats` in `src/engine/portfolio.ts`.
-- Pairs consecutive opposite signals into closed trades; trailing unmatched signal = open position, marked to `markPrice` (= last visible candle's close).
+- **Two pairing models** auto-selected per call:
+  - **Label-paired** (PAB-style, when any signal carries a `label`): sells with `sl/tp` are entries, buys with `reason` are exits; entries pair with exits by matching `label`. Open trades = entries with no matching exit. Orphan signals dropped. This avoids the "consecutive sells fabricate a phantom long" bug that the old alternating model produced for explicit short-entry/short-exit pair semantics.
+  - **Alternating-flip** (fallback for unlabeled signals): each new signal closes the previous open and flips side. Kept so the EMA-cross placeholder still works if re-enabled.
+- `ClosedTrade` carries `label`, `sl`, `tp`, `rMultiple`, `reason`, `channelLabel` when the entry signal had them — RightPanels uses these to render the trade-by-trade list.
+
+### Trade visualization on the price chart (MetaTrader-style, per trade)
+For every closed trade + the live open trade, three `LineSeries` segments are drawn on the price chart (pool kept in `tradeVizPoolRef`, grows on demand):
+- **Connector** — solid line from `(entryTime, entryPrice)` to `(exitTime, exitPrice)`. Color: green if profit, red if loss. For the open trade, exit point = `(playheadTime, markPrice)` and updates each tick.
+- **SL segment** — red dashed line from entry to exit at the stop price.
+- **TP segment** — green dashed line from entry to exit at the target price.
+
+The legacy infinite SL/TP `createPriceLine` overlays were removed in favor of these scoped segments. Sell/buy arrow markers stay; exit markers show `±NR` text (e.g. `PAB-1  +3.0R`).
+
+### Strategy panel (right side · `RightPanels.tsx::StrategySummary`)
+Direction A layout (the "minimal lines + summary" of the trade-viz redesign):
+- **LIVE card** (only when an open trade has SL/TP) — `● LIVE  PAB-N  SHORT  ch=S1` header, entry / SL / TP / now rows with prices and R-multiples; left-accent border identifies it as the active position.
+- **One-line summary**: `N closed · WW/LL · +$X realized · $Equity ±N%`.
+- **Closed trades list** (newest first): `PAB-K  ±NR  ch  reason  Nm` per row.
+- **Settings** at the bottom: lot size + starting balance inputs.
 
 ### Draw tool (`engine/drawing.ts` + `components/DrawToolbar.tsx`)
 Floating vertical toolbar pinned to the top-left of the price chart.
@@ -288,9 +338,12 @@ Floating vertical toolbar pinned to the top-left of the price chart.
 
 ### Iterate Price Action Beta v1
 v1 strategy is BUILT (see Strategy section in §5 and the spec). Fine-tuning lives in:
-- `STOP_BUFFER_PCT`, `RR`, EMA length — file-level constants in `priceActionBeta.ts`.
-- Optional follow-ups (deferred): SL/TP horizontal price-lines on the chart while a trade is open (would go through `/huashu-design`); RSI / volume / time-of-session filters; trail-stops / partial closes; UI tuning knobs.
+- `STOP_BUFFER_PCT`, `RR`, `MIN_BODY_TO_RANGE`, EMA length — file-level constants in `priceActionBeta.ts`.
+- Optional follow-ups (deferred): RSI / volume / time-of-session filters; trail-stops / partial closes; UI tuning knobs.
 - The Second-Entry state-machine idea from the original handoff is NOT what was built — v1 is the support-channel top-rail rejection short, not a second-entry pattern. If second-entry is wanted, that's a separate strategy file (don't overload `priceActionBeta`).
+
+### Channel labels by trend direction (DT/UT) — proposed, not implemented
+User-requested rename: instead of `S1/R1` (which describe *which rail is touch-anchored*), label channels by *trend direction*: `DT1` for negative-slope, `UT1` for positive-slope. The internal `kind: 'support' | 'resistance'` field would stay (the asymmetric freeze rule depends on which rail is touch-anchored) — only the displayed label changes. Where to wire: `withChannelMeta`/label registry in `channelsMeta` memo + the kind sections in `RightPanels.ChannelsList`.
 
 ### Sandbox refactor — phase 2
 Phase 1 extracted `useReplayController`, `useDatasets`, `useThemeSync`. Phase 2 candidates:
@@ -347,20 +400,31 @@ Phase 1 extracted `useReplayController`, `useDatasets`, `useThemeSync`. Phase 2 
 - **OANDA Demo history cap** is ~100k M1 bars. Scrolling back won't trigger backfill. CSVs in repo end 2026-05-22 ~22:30 Casa; range picker now hard-rejects requests past `dataBounds.to`.
 - **lightweight-charts pinned v4.2.3**. v5 has breaking API changes.
 - **CVD magnitudes don't match TV** (different vendor volumes). Shape/direction/anchor points should match.
-- **Asymmetric freeze rule** (2026-05-24, commit `d0995ce`): freezes happen only on a confirmed break of the **derived parallel rail** (support → upper; resistance → lower). Touch-anchored rail breaks return null from `findChannelBreak` and let `pickChannels` refit the channel on the next tick. Permanent-freeze still applies — once frozen, stays frozen — but freezes are now rarer and only fire on genuine counter-trend structural failures. The "replay end-state = single-shot detection" invariant is still not strictly held (a frozen channel can't be un-frozen even if a full-range pass would refit it), but the practical divergence is much smaller than before.
-- **No look-ahead in the strategy** (`runPriceActionBeta`): entries fire ONLY on the playhead bar; never re-evaluated for historical bars. State carried across replay ticks via `pabStateRef` in the sandbox. Backward scrub prunes signals + drops stale open trade. Reset on TF/range/dataset/strategy-toggle.
+- **Asymmetric freeze rule** (2026-05-24, commit `d0995ce`): freezes happen only on a confirmed break of the **derived parallel rail** (support → upper; resistance → lower). Touch-anchored rail breaks return null from `findChannelBreak` and let `pickChannels` refit the channel on the next tick. Permanent-freeze still applies — once frozen, stays frozen — but freezes are now rarer and only fire on genuine counter-trend structural failures.
+- **No look-ahead in the strategy** (`runPriceActionBeta`): entries fire ONLY on the playhead bar; never re-evaluated for historical bars. State carried across replay ticks via `pabStateRef` in the sandbox. Backward scrub prunes signals; open trade is re-derived from the pruned signals.
+- **Range-independent algorithm window** (2026-05-24, commit `86dd360`): channel detection, EMA(21), and the strategy all read `algoCandles` = full-dataset bars in `[casaSessionStartAtOrBefore(playhead), playhead]`. Same playhead time → same algorithmic output, regardless of how much history the user loaded. Trade-off: channels with anchors before the loaded range's start render visually as starting at the chart's left edge.
 - **Channel tracking by exact `startTime`** — if a refined channel's `startTime` drifts to an earlier swing, identity changes and the label increments (fresh slot in the registry). Hasn't been observed in practice on this dataset.
 - **`useMemo` mutates `trackedChannelsRef`** — deliberate cache pattern. Mutations are idempotent (Map set/delete by stable key) so StrictMode double-invoke is safe.
 - **titleBarOverlay is Windows/Linux only**. On macOS would need `titleBarStyle: 'hiddenInset'`.
 - **`npm audit`**: 2 moderate vulnerabilities in transitive Vite deps. Dev-only paths.
 - **GPG signing**: repo-local `user.signingkey = 5FD2393D65137501` (ed25519, no passphrase). Global config references an expired key — other repos will fail to sign until that's updated.
 - **session.log is gitignored**. Don't commit it.
+- **Playwright verification harness** lives in `_design/` (gitignored). Playwright `1.60.0` is not a project dep but is cached at `C:\Users\asus\AppData\Local\npm-cache\_npx\e41f203b7505f1fb\node_modules\playwright`. To run any `_design/*.cjs` script: `NODE_PATH="C:/Users/asus/AppData/Local/npm-cache/_npx/e41f203b7505f1fb/node_modules" node _design/<script>.cjs`. The Chromium binary lives at `C:\Users\asus\AppData\Local\ms-playwright\chromium_headless_shell-1223\` (one-time `npx playwright install chromium`). The dev server must be running on `http://localhost:5173` (`npm run dev`). Scripts drive the chart, scrub the playhead, and screenshot to `_design/screenshots/`; Claude `Read`s the PNGs to inspect results visually.
 
 ---
 
 ## 9 · Commit history (recent → old)
 
 ```
+86dd360 algo: session-anchored window (22:00 Casa = NY close / Asia open) makes channels + trades range-independent
+bca3a51 Revert "algo: use range-independent 24h window from full dataset…"
+e6852d5 algo: use range-independent 24h window from full dataset …       (reverted by bca3a51)
+181f874 price action beta: skip doji entries (body must be ≥15% of candle range)
+4842609 trade viz: MetaTrader-style per-trade segments (entry-exit connector + SL/TP segments)
+d01fb39 portfolio: pair signals by label (fix phantom trades from sell+buy semantic mismatch)
+5e8a558 price action beta: derive open + tradeCount from signals (fix ID inflation + phantom trades on replay)
+fccd038 trade viz: SL/TP price lines on open trade, exit markers show ±NR, redesigned strategy panel
+ae461e5 handoff: price action beta v1 + asymmetric channel freeze rule
 d0995ce channels: freeze only on derived-rail break, touch-anchored break lets pickChannels refit
 48be2c6 price action beta: stateful, no look-ahead — entries only at playhead
 ada66cb electron: forward [strategy] console lines to session.log
@@ -402,6 +466,12 @@ f6dd729 Initial commit
 - Permanent-freeze rule — once frozen, refinement cannot un-freeze (`9655d81`)
 - **Price Action Beta v1 BUILT** — support-channel top-rail rejection short, 1:3 RR, stateful + no look-ahead (`862956c`, `1f9c119`, `ada66cb`, `48be2c6`). Spec + plan committed (`6badfcc`, `f6b749c`).
 - **Asymmetric freeze rule** — only derived-rail breaks freeze; touch-anchored breaks let `pickChannels` refit (`d0995ce`).
+- **Trade visualization v1** — LIVE card + closed-trades list in the Strategy panel (`fccd038`); MetaTrader-style per-trade segments on the price chart (connector + SL/TP segments per trade) (`4842609`).
+- **PAB state refactor** — `open` and `tradeCount` derived fresh from `signals` each call; fixes ID inflation on replay and phantom-trade pairing bugs (`5e8a558`).
+- **Portfolio label-paired model** — `computeStats` pairs labeled signals by `label` instead of alternation; alternation kept as fallback for unlabeled signals (placeholder EMA-cross) (`d01fb39`).
+- **Doji filter** — entries reject candles where body < 15% of total range (`181f874`).
+- **Range-independent algorithm window** — `algoCandles` = full-dataset bars in `[22:00 Casa session start, playhead]`; channels + EMA + strategy all read it instead of `visibleCandles`. Same playhead → same trades regardless of loaded range. Verified end-to-end via Playwright (`86dd360`).
+- **Playwright verification harness** — `_design/*.cjs` scripts drive the live app, screenshot to `_design/screenshots/`, agent reads PNGs.
 
 ---
 
@@ -421,4 +491,4 @@ Between 2026-05-23 and 2026-05-24 an experimental v2 algorithm was designed, imp
 
 ---
 
-Last update: 2026-05-24.
+Last update: 2026-05-24 (commit `86dd360` — session-anchored algorithm window).
